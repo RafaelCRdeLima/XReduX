@@ -226,12 +226,26 @@ products/
     0412601301/
 ```
 
-**O caminho nunca tem espaço.** As tarefas do SAS descartam o espaço no meio de
-um caminho: um diretório `RX J1308.6+2127` chega ao `odfingest` como
-`RXJ1308.6+2127`, e a tarefa falha dizendo que o ODF não existe — sem nenhuma
-pista de que o problema foi o espaço. Por isso o nome legível vive no
-`source.json` e a pasta usa a forma compacta. O `tools/doctor.py` avisa se
-alguma pasta ou o próprio diretório de trabalho tiver espaço.
+**O caminho só usa letras, dígitos, `.`, `-` e `_`.** O SAS recusa pontuação em
+caminhos, e cada componente falha de um jeito diferente — todos dizendo apenas
+que o arquivo não existe:
+
+| caractere | quem quebra | como |
+|---|---|---|
+| espaço | `odfingest` | recebe `RX J1308.6` como `RXJ1308.6` |
+| `+` | `epproc::hkgtigen` | corta em `RXJ1308.6`, lendo o resto como extensão |
+| `[` `]` | CFITSIO | toma por seletor de extensão |
+| `:` | leitor do SAS | não resolve o caminho |
+
+Sondar uma tarefa só não basta: o `+` passa no `dshead` e no `ftlist`, e quebra
+no `hkgtigen`. Por isso a regra é conservadora, e o sinal da declinação vira
+separador — `RX J1308.6+2127` fica `RXJ1308.6_2127`. O nome legível vive no
+`source.json`. O `tools/doctor.py` verifica as pastas e o diretório de trabalho.
+
+**Mover uma observação exige corrigir o sumário.** O `odfingest` grava o caminho
+absoluto do ODF dentro do `*SUM.SAS`; depois de mover, ele aponta para o nada e
+o `epproc` falha reclamando de um arquivo de eventos, sem mencionar o sumário.
+`Pipeline.restore()` conserta isso sozinho ao reabrir a observação.
 
 O agrupamento é **por posição**, não por nome. A mesma fonte chega como
 `RBS1223` no sumário do ODF e como `RX J1308.6+2127` na busca por nome; casar

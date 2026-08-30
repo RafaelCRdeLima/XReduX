@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from xredux.archive import Archive, compact_name  # noqa: E402
 from xredux.config import Settings  # noqa: E402
+from xredux.tasks import calibration  # noqa: E402
 
 
 def identify(directory: Path) -> tuple[str, float | None, float | None]:
@@ -70,11 +71,12 @@ def main() -> int:
     root = arguments.root or Settings.load().work_dir
     archive = Archive(root)
 
-    # Pastas com espaço no nome quebram toda tarefa do SAS: o odfingest recebe
-    # o caminho sem o espaço e não acha o ODF.
+    # Pontuação no nome da pasta quebra as tarefas do SAS, cada uma de um
+    # jeito: o espaço some no odfingest, o "+" corta o caminho no hkgtigen.
     for source in archive.misnamed():
         target = root / compact_name(source.directory.name)
-        print(f"espaço no nome da pasta: {source.directory.name} -> {target.name}")
+        print(f"nome de pasta incompatível com o SAS: "
+              f"{source.directory.name} -> {target.name}")
         if not arguments.apply:
             continue
         if target.exists():
@@ -135,6 +137,10 @@ def _repoint(directory: Path, old: Path, new: Path) -> None:
     Mover o diretório sem corrigi-los deixaria o histórico apontando para um
     lugar que não existe mais.
     """
+    # O sumário do odfingest guarda o caminho absoluto do ODF.
+    for summary in directory.glob("*SUM.SAS"):
+        calibration.repoint_summary(summary, directory / "odf")
+
     for name in ("session.json", "reproduce.sh"):
         path = directory / name
         if not path.is_file():

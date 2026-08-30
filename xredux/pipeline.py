@@ -170,6 +170,11 @@ class Pipeline:
             # e o usuário refaz um trabalho que já está pronto.
             if not session.is_done("calibration"):
                 session.finish("calibration", outputs=[cif, summary])
+            # O sumário guarda o caminho absoluto do ODF; se a observação mudou
+            # de lugar, ele aponta para o nada e o epproc falha reclamando de
+            # outro arquivo.
+            if calibration.repoint_summary(summary, self.state.odf_dir or work / "odf"):
+                restored.append("caminho do ODF no sumário")
             self.context.env["SAS_CCF"] = str(cif)
             self.context.env["SAS_ODF"] = str(summary)
             setup = calibration.read_setup(self.context, cif, summary,

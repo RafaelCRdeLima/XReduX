@@ -39,20 +39,38 @@ def sanitise_name(name: str) -> str:
     return cleaned or "fonte-sem-nome"
 
 
+#: Único conjunto de caracteres que sobreviveu a todas as medições abaixo.
+_UNSAFE_IN_PATH = re.compile(r"[^A-Za-z0-9._-]")
+#: O sinal da declinação vira separador em vez de sumir, para o nome continuar
+#: legível: ``RX J1308.6+2127`` → ``RXJ1308.6_2127``.
+_SIGN = str.maketrans({"+": "_"})
+
+
 def compact_name(name: str) -> str:
-    r"""Forma do nome utilizável em caminho de arquivo: sem espaços.
+    r"""Forma do nome utilizável em caminho de arquivo.
 
-    **As tarefas do SAS descartam o espaço no meio de um caminho.** Um diretório
-    ``RX J1308.6+2127`` chega ao ``odfingest`` como ``RXJ1308.6+2127``, e a
-    tarefa falha dizendo que o arquivo não existe — sem nenhuma pista de que o
-    problema foi o espaço. Por isso o nome legível vive no ``source.json`` e
-    nunca no caminho.
+    **O SAS não aceita pontuação em caminhos, e cada componente falha de um
+    jeito diferente.** Medido tarefa a tarefa nesta instalação:
 
-    Serve também para nomes de arquivo, que acabam em ``\includegraphics`` e em
-    linhas de comando, onde um espaço vira dois argumentos.
+    ===========  ====================================================
+    ``espaço``   o ``odfingest`` recebe ``RX J1308.6`` como
+                 ``RXJ1308.6`` e diz que o ODF não existe
+    ``+``        o ``epproc::hkgtigen`` corta em ``RXJ1308.6``,
+                 lendo o resto como número de extensão
+    ``[`` ``]``  o CFITSIO os toma por seletor de extensão
+    ``:``        o leitor do SAS não resolve o caminho
+    ===========  ====================================================
+
+    Nenhuma dessas falhas se anuncia como problema de nome: todas dizem que o
+    arquivo não existe. E não adianta sondar uma tarefa só — o ``+`` passa no
+    ``dshead`` e no ``ftlist``, e quebra no ``hkgtigen``. Por isso a regra é
+    conservadora: letras, dígitos, ``.``, ``-`` e ``_``, nada mais.
+
+    O nome legível vive no ``source.json`` e nunca no caminho. Esta forma serve
+    também para nomes de arquivo, que acabam em ``\includegraphics`` e em
+    linhas de comando.
     """
-    return "".join(character for character in name
-                   if character.isalnum() or character in "+-._")
+    return _UNSAFE_IN_PATH.sub("", name.translate(_SIGN))
 
 
 def file_stem(name: str, obsid: str) -> str:

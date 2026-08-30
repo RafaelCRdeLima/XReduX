@@ -91,6 +91,42 @@ def read_setup(context: TaskContext, cif: Path, summary: Path, odf_dir: Path) ->
     return setup
 
 
+#: O sumário registra o diretório do ODF numa linha ``PATH <caminho absoluto>``.
+_SUMMARY_PATH = re.compile(r"^(PATH\s+)(\S.*)$", re.MULTILINE)
+
+
+def repoint_summary(summary: Path, odf_dir: Path) -> bool:
+    """Corrige o diretório do ODF gravado dentro do sumário.
+
+    O ``odfingest`` grava o caminho absoluto do ODF no ``*SUM.SAS``. Mover a
+    observação — para outra pasta, outro disco, outra máquina — deixa esse
+    caminho apontando para lugar nenhum, e o ``epproc`` falha reclamando de um
+    arquivo de eventos, sem nenhuma menção ao sumário. Pior: o SAS concatena o
+    caminho morto com ``SAS_ODF`` e relata um caminho duplicado, que não parece
+    ter relação com o problema.
+
+    Devolve ``True`` quando precisou reescrever.
+    """
+    # Absoluto sempre: o SAS resolve este caminho a partir do diretório em que
+    # a tarefa roda, que não é o da observação.
+    odf_dir = Path(odf_dir).resolve()
+    if not odf_dir.is_dir():
+        return False
+    try:
+        text = summary.read_text(encoding="latin-1")
+    except OSError:
+        return False
+
+    updated = _SUMMARY_PATH.sub(lambda match: match.group(1) + str(odf_dir), text)
+    if updated == text:
+        return False
+    try:
+        summary.write_text(updated, encoding="latin-1")
+    except OSError:
+        return False
+    return True
+
+
 def read_target(summary: Path) -> tuple[str, float | None, float | None]:
     """Alvo e coordenadas do sumário do ODF, sem exigir CCF nem contexto.
 
