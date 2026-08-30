@@ -1,0 +1,15 @@
+# Ambiente do XREDUX dentro do contêiner.
+#
+# Curto de propósito: o pacote `heasoft` do canal do HEASARC já arrasta PySide6,
+# astropy, numpy, scipy e matplotlib como dependências, e traz junto o PyXspec e
+# o heasoftpy. Só o astroquery fica de fora.
+#
+# O SAS não entra aqui: ele não é distribuído por conda e é instalado à parte, a
+# partir do tarball oficial da ESA.
+name: xredux
+channels:
+  - https://heasarc.gsfc.nasa.gov/FTP/software/conda
+  - conda-forge
+dependencies:
+  - heasoft=6.36
+  - astroquery

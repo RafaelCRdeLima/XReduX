@@ -1,0 +1,221 @@
+<title>Guia da interface do XREDUX</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+  :root {
+    --ground:#eef1f6; --surface:#ffffff; --sunk:#e4e9f1;
+    --ink:#16202e; --muted:#5b6b82; --rule:#d3dbe7;
+    --accent:#2f6ce0; --accent-soft:#e3ecfd;
+    --warn:#9a6b06;
+    --serif:"Source Serif 4",Georgia,"Times New Roman",serif;
+    --sans:"IBM Plex Sans","Segoe UI",Helvetica,Arial,sans-serif;
+    --mono:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0e1420; --surface:#151d2a; --sunk:#1c2634;
+      --ink:#e7edf6; --muted:#94a5bd; --rule:#273346;
+      --accent:#7aa6ff; --accent-soft:#1b2a45; --warn:#d8a43c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0e1420; --surface:#151d2a; --sunk:#1c2634;
+    --ink:#e7edf6; --muted:#94a5bd; --rule:#273346;
+    --accent:#7aa6ff; --accent-soft:#1b2a45; --warn:#d8a43c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--ink);
+         font-family:var(--sans); font-size:16px; line-height:1.6;
+         -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1020px; margin:0 auto; padding:0 24px 96px; }
+  header.masthead { padding:72px 0 40px; border-bottom:2px solid var(--ink); }
+  .eyebrow { font-family:var(--mono); font-size:12px; letter-spacing:.14em;
+             text-transform:uppercase; color:var(--accent); margin:0 0 14px; }
+  h1 { font-family:var(--serif); font-weight:600; font-size:clamp(32px,5vw,50px);
+       line-height:1.1; margin:0 0 18px; text-wrap:balance; letter-spacing:-.01em; }
+  .standfirst { font-size:19px; color:var(--muted); max-width:62ch; margin:0; }
+  .context { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+             margin:34px 0 0; padding:22px; background:var(--surface);
+             border:1px solid var(--rule); border-radius:3px; }
+  .fact dt { font-family:var(--mono); font-size:11px; letter-spacing:.1em;
+             text-transform:uppercase; color:var(--muted); margin:0 0 6px; }
+  .fact dd { margin:0; font-size:21px; font-family:var(--serif); font-weight:600;
+             font-variant-numeric:tabular-nums; }
+  .fact dd small { display:block; font-family:var(--sans); font-size:13px;
+                   font-weight:400; color:var(--muted); margin-top:2px; }
+  .step { padding:56px 0; border-bottom:1px solid var(--rule); }
+  .step-head { display:flex; gap:20px; align-items:baseline; }
+  .step-n { font-family:var(--serif); font-size:44px; font-weight:600; line-height:1;
+            color:var(--accent); min-width:52px; font-variant-numeric:tabular-nums; }
+  .step h2 { font-family:var(--serif); font-size:29px; font-weight:600; margin:0;
+             letter-spacing:-.01em; }
+  .tasks { font-family:var(--mono); font-size:12.5px; color:var(--muted);
+           margin:6px 0 0; letter-spacing:.02em; }
+  .lede { margin:20px 0 26px 72px; max-width:64ch; }
+  figure { margin:0 0 28px; background:var(--sunk); border:1px solid var(--rule);
+           border-radius:3px; padding:12px; overflow-x:auto; }
+  figure img { display:block; width:100%; height:auto; border-radius:2px;
+               box-shadow:0 1px 3px rgba(15,25,40,.16); }
+  .decisions { margin:0 0 0 72px; display:grid; gap:16px; }
+  .decision { display:grid; grid-template-columns:180px 1fr; gap:20px;
+              padding-top:14px; border-top:1px solid var(--rule); }
+  .decision dt { font-weight:600; font-size:14.5px; }
+  .decision dd { margin:0; color:var(--muted); max-width:60ch; }
+  code { font-family:var(--mono); font-size:.88em; background:var(--accent-soft);
+         color:var(--accent); padding:1px 5px; border-radius:2px; }
+  b { font-weight:600; color:var(--ink); }
+  .closing { padding:56px 0 0; }
+  .closing h2 { font-family:var(--serif); font-size:26px; font-weight:600; margin:0 0 18px; }
+  pre { font-family:var(--mono); font-size:13.5px; line-height:1.7; background:var(--surface);
+        border:1px solid var(--rule); border-left:3px solid var(--accent);
+        border-radius:3px; padding:18px 20px; overflow-x:auto; margin:0 0 20px; }
+  pre .c { color:var(--muted); }
+  .note { display:grid; grid-template-columns:auto 1fr; gap:14px; align-items:start;
+          background:var(--surface); border:1px solid var(--rule); border-radius:3px;
+          padding:18px 20px; margin:0 0 16px; }
+  .tag { font-family:var(--mono); font-size:11px; letter-spacing:.09em;
+         text-transform:uppercase; padding:3px 8px; border-radius:2px;
+         white-space:nowrap; background:var(--accent-soft); color:var(--accent); }
+  .note p { margin:0; color:var(--muted); max-width:64ch; }
+  .note p b { color:var(--ink); }
+  @media (max-width:720px) {
+    .lede, .decisions { margin-left:0; }
+    .decision { grid-template-columns:1fr; gap:4px; }
+    .step-n { font-size:32px; min-width:38px; }
+  }
+  @media (prefers-reduced-motion:reduce) { * { animation:none!important; transition:none!important; } }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow">XREDUX · guia da interface</p>
+    <h1>As oito etapas, na ordem em que dependem umas das outras</h1>
+    <p class="standfirst">Cada etapa com as decisões que ela pede. As telas são reais: a etapa 1 mostra a busca de <b>RX J1308.6+2127</b> no arquivo público do XMM-Newton.</p>
+    <dl class="context">
+      <div class="fact"><dt>Exemplo</dt><dd>RBS 1223<small>RX J1308.6+2127</small></dd></div>
+      <div class="fact"><dt>Observações públicas</dt><dd>14<small>2001 a 2019</small></dd></div>
+      <div class="fact"><dt>EPIC-pn científico</dt><dd>192 ks<small>Full, Small e Large Window</small></dd></div>
+      <div class="fact"><dt>Período de rotação</dt><dd>10,31 s<small>resolução temporal não limita</small></dd></div>
+    </dl>
+  </header>
+
+  <main>
+      <section class="step" id="etapa-1">
+        <header class="step-head"><span class="step-n">1</span>
+          <div><h2>Aquisição</h2><p class="tasks">consulta TAP ao XSA · download AIO</p></div>
+        </header>
+        <p class="lede">A busca aceita o nome do alvo — resolvido pelo Sesame — ou um ObsID direto.</p>
+        <figure><img src="img/aquisicao.webp" alt="1. Aquisição" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Qual observação</dt><dd>A coluna <b>Duração</b> ordena o que vale a pena. Comece pela mais longa.</dd></div>
+          <div class="decision"><dt>Já tenho o ODF</dt><dd><b>Usar ODF local…</b> pula o download e aponta para um diretório no disco.</dd></div>
+          <div class="decision"><dt>Atenção</dt><dd>O pacote tem 1 a 2 GB e o servidor do XSA não permite retomada. Se a transferência cair, o programa recomeça do zero e só aceita o arquivo depois de conseguir lê-lo inteiro.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-2">
+        <header class="step-head"><span class="step-n">2</span>
+          <div><h2>Calibração</h2><p class="tasks">cifbuild · odfingest</p></div>
+        </header>
+        <p class="lede">Constrói o índice de calibração válido para a data da observação e ingere o ODF. Sem esses dois produtos nenhuma outra tarefa do SAS roda.</p>
+        <figure><img src="img/calibracao.webp" alt="2. Calibração" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Fixe as coordenadas</dt><dd><b>AR</b> e <b>Dec</b> vêm do sumário do ODF. Confira e clique em <b>Fixar coordenadas da fonte</b>: é esse valor que o <code>barycen</code> usa para corrigir os tempos.</dd></div>
+          <div class="decision"><dt>A tabela</dt><dd>Lista as exposições por instrumento e modo. A coluna <b>Timing</b> marca as que têm resolução adequada a pulsares rápidos.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-3">
+        <header class="step-head"><span class="step-n">3</span>
+          <div><h2>Processamento</h2><p class="tasks">epproc · emproc · rgsproc · omichain</p></div>
+        </header>
+        <p class="lede">As cadeias oficiais do SAS que transformam o ODF bruto em listas de eventos calibradas. É a etapa mais cara do pipeline.</p>
+        <figure><img src="img/processamento.webp" alt="3. Processamento" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Quanto demora</dt><dd>De um minuto (EPIC-pn em Small Window) a mais de uma hora (Full Frame com os 12 CCDs, mais MOS e RGS). O log mostra o progresso e <b>Cancelar</b> funciona.</dd></div>
+          <div class="decision"><dt>Escolha o mínimo</dt><dd>Para timing, só o EPIC-pn resolve. MOS e RGS custam tempo e só entram se você for usá-los.</dd></div>
+          <div class="decision"><dt>Selecione a lista</dt><dd>A tabela traz modo, filtro, ontime e resolução temporal. Clique na linha que vai usar.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-4">
+        <header class="step-head"><span class="step-n">4</span>
+          <div><h2>Filtragem de flares</h2><p class="tasks">evselect · tabgtigen</p></div>
+        </header>
+        <p class="lede">O fundo do XMM sofre surtos de prótons moles que multiplicam a taxa de contagem em minutos. O gráfico é a curva em energia alta, onde a fonte quase não contribui.</p>
+        <figure><img src="img/filtragem.webp" alt="4. Filtragem de flares" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>O limiar</dt><dd>A linha vermelha tracejada é o corte. O padrão vem da recomendação da ESA; ao mexer no campo a linha se move e o texto diz quanto do tempo sobrevive.</dd></div>
+          <div class="decision"><dt>Quando desconfiar</dt><dd>Se sobrar bem menos que 90% do tempo, olhe a curva antes de aceitar.</dd></div>
+          <div class="decision"><dt>A banda</dt><dd>Mantenha larga. Restringir energia aqui inviabiliza reaproveitar a mesma lista para espectro e timing em bandas diferentes.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-5">
+        <header class="step-head"><span class="step-n">5</span>
+          <div><h2>Regiões</h2><p class="tasks">evselect · eregionanalyse · epatplot</p></div>
+        </header>
+        <p class="lede">De onde vêm os fótons da fonte e os do fundo. Duas geometrias diferentes convivem aqui, e confundi-las é erro silencioso.</p>
+        <figure><img src="img/regioes.webp" alt="5. Regiões" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Modo de imagem</dt><dd>A fonte é um círculo em (X, Y). <b>Posicionar pela AR/Dec</b> converte as coordenadas celestes nas do detector usando a projeção gravada na lista de eventos.</dd></div>
+          <div class="decision"><dt>Modo Timing</dt><dd>Não existe eixo Y útil: a fonte é um intervalo de colunas RAWX. Os controles mudam sozinhos e <b>Sugerir regiões</b> aplica as faixas padrão da ESA.</dd></div>
+          <div class="decision"><dt>Pile-up</dt><dd><b>Checar pile-up</b> roda o <code>epatplot</code>. Vale sempre em fonte brilhante: o empilhamento distorce espectro e curva de luz ao mesmo tempo.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-6">
+        <header class="step-head"><span class="step-n">6</span>
+          <div><h2>Timing</h2><p class="tasks">barycen · epiclccorr · efsearch · efold · Z²ₙ</p></div>
+        </header>
+        <p class="lede">Do tempo do satélite ao período do pulsar. A correção baricêntrica não é opcional: sem ela o movimento da Terra espalha o sinal.</p>
+        <figure><img src="img/timing.webp" alt="6. Timing" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Ordem</dt><dd><b>Corrigir ao baricentro</b> primeiro, sempre. Só depois extraia a curva de luz.</dd></div>
+          <div class="decision"><dt>A banda importa</dt><dd>Escolha onde a fonte emite. Numa estrela de nêutrons térmica, algo entre 150 e 2000 eV.</dd></div>
+          <div class="decision"><dt>Duas passadas</dt><dd><b>Buscar (efsearch)</b> varre um intervalo amplo sobre a curva binada. <b>Refinar (Z²ₙ)</b> usa os tempos não binados numa grade estreita — mais sensível quando a fração pulsada é baixa.</dd></div>
+          <div class="decision"><dt>Leia o resultado</dt><dd>Traz P, Z²ₙ, o teste H com sua probabilidade e a fração pulsada. Se o H escolher m &gt; 1, o perfil tem estrutura além do fundamental e a fração vem acompanhada do valor RMS.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-7">
+        <header class="step-head"><span class="step-n">7</span>
+          <div><h2>Espectros</h2><p class="tasks">evselect · backscale · rmfgen · arfgen · phasecalc</p></div>
+        </header>
+        <p class="lede">A contagem de fótons por canal, com a resposta específica desta observação. É o produto que o PULSARIS ajusta.</p>
+        <figure><img src="img/espectros.webp" alt="7. Espectros" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>O que sai</dt><dd>Espectro da fonte, espectro do fundo, <b>RMF</b> e <b>ARF</b> geradas para esta observação, esta região e esta posição no detector — mais a versão agrupada, pronta para o XSPEC.</dd></div>
+          <div class="decision"><dt>Demora</dt><dd><code>rmfgen</code> e <code>arfgen</code> levam alguns minutos cada.</dd></div>
+          <div class="decision"><dt>Resolvido em fase</dt><dd>Exige o período da etapa 6. Extrai um espectro por fatia de fase — é a variação entre elas que restringe a geometria.</dd></div>
+        </dl>
+      </section>
+      <section class="step" id="etapa-8">
+        <header class="step-head"><span class="step-n">8</span>
+          <div><h2>Exportação</h2><p class="tasks">CSV de eventos · fundo · perfil de instrumento</p></div>
+        </header>
+        <p class="lede">Fecha o ciclo entregando os produtos no formato que o PULSARIS ajusta.</p>
+        <figure><img src="img/exportacao.webp" alt="8. Exportação" loading="lazy"></figure>
+        <dl class="decisions">
+          <div class="decision"><dt>Três produtos</dt><dd>O CSV de eventos <b>da região da fonte</b> (não do campo inteiro), a tabela de fundo escalada pelo BACKSCAL, e o perfil de instrumento construído a partir da ARF e da RMF reais.</dd></div>
+          <div class="decision"><dt>N_H</dt><dd>O cabeçalho recebe a coluna galáctica consultada na ferramenta <code>nh</code> do HEASoft. É a coluna integrada da Galáxia, portanto <b>limite superior</b> para uma fonte próxima.</dd></div>
+          <div class="decision"><dt>Instalar é explícito</dt><dd><b>Instalar no PULSARIS</b> mostra o que será escrito e faz cópia de segurança do <code>manifest.json</code> antes de tocar em qualquer coisa.</dd></div>
+        </dl>
+      </section>
+  </main>
+
+  <section class="closing">
+    <h2>Três coisas que valem saber</h2>
+    <div class="note"><span class="tag">Retomável</span><p>Cada observação tem seu diretório em <code>products/&lt;ObsID&gt;/</code> com um <code>session.json</code>. Feche a janela no meio e reabra com <b>Abrir sessão…</b>: as etapas concluídas aparecem marcadas e o <code>epproc</code> não se refaz à toa.</p></div>
+    <div class="note"><span class="tag">Reprodutível</span><p><b>Script reprodutível</b> grava um <code>reproduce.sh</code> com todos os comandos executados, em ordem. É o que torna a redução defensável num artigo.</p></div>
+    <div class="note"><span class="tag">O log importa</span><p>O painel inferior mostra a saída das tarefas ao vivo. Avisos de pile-up, calibração ausente ou exposição zerada aparecem ali antes de virarem um número errado.</p></div>
+
+    <h2 style="margin-top:40px">A mesma redução sem a janela</h2>
+    <pre><span class="c"># interface gráfica</span>
+./xredux.sh
+
+<span class="c"># ou a mesma coisa em um comando</span>
+python tools/reduce.py --obsid 0163560101 --target "RX J1308.6+2127" \
+    --period 10.3 --band 150 2000 --export
+
+<span class="c"># ou dentro do contêiner, sem instalar nada</span>
+docker/run.sh reduce --obsid 0163560101 --target "RX J1308.6+2127" --period 10.3</pre>
+  </section>
+</div>

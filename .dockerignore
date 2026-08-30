@@ -1,0 +1,10 @@
+# O contexto precisa levar só o código e o tarball do SAS.
+external/
+products/
+.git/
+**/__pycache__/
+*.pyc
+*.log
+docs/
+vendor/*
+!vendor/sas_22.1.0-ubuntu24.04.tgz
