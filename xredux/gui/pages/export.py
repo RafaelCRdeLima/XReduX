@@ -127,6 +127,10 @@ class ExportPage(Page):
                 column = absorption.galactic_column(pipeline.context,
                                                     state.ra, state.dec)
                 if column is not None:
+                    # Duas chaves de propósito: "nh" é o nome curto que o
+                    # PULSARIS lê, e o longo diz o que o número é — limite
+                    # superior, por ser a coluna galáctica inteira.
+                    extra["nh"] = f"{column.nh_1e22:.6g}"
                     extra["nh_galactic_upper_1e22"] = f"{column.nh_1e22:.6g}"
                     extra["nh_survey"] = column.survey
 
