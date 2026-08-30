@@ -50,7 +50,7 @@ class ArchiveTest(unittest.TestCase):
                                               197.2029, 21.4522)
         self.assertEqual(first.parent, second.parent)
         # A pasta usa a forma compacta; o nome legível fica no descritor.
-        self.assertEqual(first.parent.name, "RXJ1308.6+2127")
+        self.assertEqual(first.parent.name, "RXJ1308.6_2127")
 
         stored = json.loads((first.parent / "source.json").read_text(encoding="utf-8"))
         self.assertEqual(stored["name"], "RX J1308.6+2127")
@@ -105,9 +105,9 @@ class FileStemTest(unittest.TestCase):
         self.assertEqual(file_stem("RX J1856.5-3754", "0412601301"),
                          "RXJ1856.5-3754_0412601301")
 
-    def test_keeps_the_plus_of_a_positive_declination(self) -> None:
+    def test_declination_sign_becomes_a_separator(self) -> None:
         self.assertEqual(file_stem("RX J1308.6+2127", "0844140101"),
-                         "RXJ1308.6+2127_0844140101")
+                         "RXJ1308.6_2127_0844140101")
 
     def test_falls_back_to_the_obsid(self) -> None:
         self.assertEqual(file_stem("", "0163560101"), "0163560101")
@@ -165,25 +165,36 @@ class CanonicalNameTest(unittest.TestCase):
 
 
 class PathSafetyTest(unittest.TestCase):
-    """O SAS descarta o espaço no meio de um caminho.
+    """O SAS recusa pontuação em caminhos, cada componente à sua maneira.
 
-    Um diretório ``RX J1308.6+2127`` chega ao odfingest como
-    ``RXJ1308.6+2127`` e a tarefa falha dizendo que o ODF não existe. O nome
-    legível fica no source.json; o caminho nunca tem espaço.
+    O espaço some no odfingest; o ``+`` corta o caminho no epproc::hkgtigen; o
+    ``[`` é seletor de extensão para o CFITSIO. Todos relatam apenas que o
+    arquivo não existe. O nome legível fica no source.json.
     """
 
     def test_compact_name_removes_spaces(self) -> None:
-        self.assertEqual(compact_name("RX J1308.6+2127"), "RXJ1308.6+2127")
-
-    def test_compact_name_keeps_catalogue_punctuation(self) -> None:
         self.assertEqual(compact_name("RX J1856.5-3754"), "RXJ1856.5-3754")
+
+    def test_compact_name_turns_the_declination_sign_into_a_separator(self) -> None:
+        self.assertEqual(compact_name("RX J1308.6+2127"), "RXJ1308.6_2127")
+
+    def test_compact_name_drops_every_other_punctuation(self) -> None:
+        for hostile in "[]:#,()*?\'\"":
+            with self.subTest(character=hostile):
+                self.assertNotIn(hostile, compact_name(f"Fonte{hostile}1"))
+
+    def test_compact_name_keeps_what_was_measured_safe(self) -> None:
+        self.assertEqual(compact_name("4U 1626-67"), "4U1626-67")
+        self.assertEqual(compact_name("Fonte_1.2"), "Fonte_1.2")
 
     def test_no_archived_path_ever_contains_a_space(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             archive = Archive(Path(directory))
             work = archive.observation_dir("0844140101", "RX J1308.6+2127",
                                            197.2025, 21.4524)
-            self.assertNotIn(" ", str(work.relative_to(directory)))
+            relative = str(work.relative_to(directory))
+            for hostile in " +[]:#,()":
+                self.assertNotIn(hostile, relative)
 
     def test_readable_name_survives_in_the_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -192,7 +203,7 @@ class PathSafetyTest(unittest.TestCase):
                                            197.2025, 21.4524)
             source = archive.source_of(work)
             self.assertEqual(source.name, "RX J1308.6+2127")
-            self.assertEqual(source.directory.name, "RXJ1308.6+2127")
+            self.assertEqual(source.directory.name, "RXJ1308.6_2127")
 
     def test_rename_also_yields_a_path_without_spaces(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -200,7 +211,7 @@ class PathSafetyTest(unittest.TestCase):
             work = archive.observation_dir("0163560101", "RBS1223", 197.2, 21.45)
             renamed = archive.rename(archive.source_of(work), "RX J1308.6+2127")
             self.assertEqual(renamed.name, "RX J1308.6+2127")
-            self.assertEqual(renamed.directory.name, "RXJ1308.6+2127")
+            self.assertEqual(renamed.directory.name, "RXJ1308.6_2127")
             self.assertEqual(renamed.observations(), ["0163560101"])
 
     def test_folders_with_spaces_are_reported_for_repair(self) -> None:

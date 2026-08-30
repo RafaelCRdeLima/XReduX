@@ -598,5 +598,58 @@ class CalibrationRestoreTest(unittest.TestCase):
             self.assertFalse(reopened.session.is_done("calibration"))
 
 
+class SummaryRepointTest(unittest.TestCase):
+    """O sumário do odfingest guarda o caminho absoluto do ODF.
+
+    Mover a observação deixa esse caminho apontando para o nada, e o epproc
+    falha reclamando de um arquivo de eventos — o SAS concatena o caminho morto
+    com SAS_ODF e relata um caminho duplicado, sem nenhuma menção ao sumário.
+    """
+
+    HEAD = "// SAS summary\n//\nPATH {path}\n//\nRBS1223 / target name\n"
+
+    def _summary(self, work: Path, path: str) -> Path:
+        summary = work / "3666_0844140101_SCX00000SUM.SAS"
+        summary.write_text(self.HEAD.format(path=path), encoding="latin-1")
+        return summary
+
+    def test_stale_path_is_rewritten_to_the_current_odf(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "odf").mkdir()
+            summary = self._summary(work, "/lugar/que/nao/existe/odf")
+
+            self.assertTrue(calibration.repoint_summary(summary, work / "odf"))
+            written = summary.read_text(encoding="latin-1")
+            self.assertIn(f"PATH {(work / 'odf').resolve()}", written)
+            # O resto do sumário não pode ser tocado.
+            self.assertIn("RBS1223 / target name", written)
+
+    def test_the_path_is_written_absolute(self) -> None:
+        """As tarefas do SAS não rodam a partir do diretório da observação."""
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "odf").mkdir()
+            summary = self._summary(work, "/antigo/odf")
+            calibration.repoint_summary(summary, work / "odf")
+            line = next(l for l in summary.read_text(encoding="latin-1").splitlines()
+                        if l.startswith("PATH "))
+            self.assertTrue(Path(line.removeprefix("PATH ")).is_absolute())
+
+    def test_a_correct_summary_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "odf").mkdir()
+            summary = self._summary(work, str((work / "odf").resolve()))
+            self.assertFalse(calibration.repoint_summary(summary, work / "odf"))
+
+    def test_a_missing_odf_directory_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            summary = self._summary(work, "/antigo/odf")
+            self.assertFalse(calibration.repoint_summary(summary, work / "odf"))
+            self.assertIn("PATH /antigo/odf", summary.read_text(encoding="latin-1"))
+
+
 if __name__ == "__main__":
     unittest.main()

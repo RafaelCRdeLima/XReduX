@@ -185,25 +185,28 @@ def check_pulsaris(report: Report, settings: Settings) -> None:
 
 
 def check_archive(report: Report, settings: Settings) -> None:
-    """Confere que nenhum caminho de trabalho tem espaço.
+    """Confere que os caminhos de trabalho não têm pontuação que o SAS recuse.
 
-    As tarefas do SAS descartam o espaço no meio de um caminho: o odfingest
-    recebe ``RX J1308.6+2127`` como ``RXJ1308.6+2127`` e falha dizendo que o
-    ODF não existe, sem nenhuma pista de qual foi o problema.
+    Cada componente falha de um jeito e nenhum diz que o problema é o nome: o
+    odfingest engole o espaço, o epproc::hkgtigen corta o caminho no ``+``,
+    o CFITSIO toma ``[`` por seletor de extensão. Todos relatam apenas que o
+    arquivo não existe.
     """
     report.heading("Arquivo de observações")
     root = Path(settings.work_dir)
-    if " " in str(root):
-        report.fail(f"o diretório de trabalho tem espaço no caminho: {root}",
-                    "nenhuma tarefa do SAS roda a partir dele; escolha outro "
-                    "diretório em Ambiente")
+    risky = {character for character in str(root) if character in " +[]:#,()"}
+    if risky:
+        report.fail(f"o diretório de trabalho tem {''.join(sorted(risky))!r} "
+                    f"no caminho: {root}",
+                    "as tarefas do SAS falham dizendo que o arquivo não existe; "
+                    "escolha outro diretório em Ambiente")
     else:
-        report.ok(f"raiz sem espaços: {root}")
+        report.ok(f"raiz compatível com o SAS: {root}")
 
     misnamed = settings.archive().misnamed()
     if misnamed:
         nomes = ", ".join(source.directory.name for source in misnamed)
-        report.fail(f"pasta(s) de fonte com espaço no nome: {nomes}",
+        report.fail(f"pasta(s) de fonte com nome incompatível: {nomes}",
                     "rode: python tools/organise_archive.py --apply")
     else:
         report.ok("nomes de pasta compatíveis com o SAS")
