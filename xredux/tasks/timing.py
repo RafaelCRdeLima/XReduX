@@ -176,11 +176,203 @@ def power_spectrum(context: TaskContext, light_curve: LightCurve,
         f"dtnb={light_curve.binsize_s:g}",
         f"nbint={intervals}",
         "nintfm=INDEF",
+        "normalization=1",
+        "rebin=0",
         "plot=no",
         f"outfile={output}",
         "outfiletype=2",
     ], cwd=context.work_dir, timeout=3600)
+    context.require(output)
     return output
+
+
+#: Limiar de χ² com 2 graus de liberdade para p = 0,001, válido sob ruído
+#: branco. Z²₁ segue essa distribuição só na ausência de ruído vermelho.
+FUNDAMENTAL_THRESHOLD = 13.8
+#: Quanto Z²₁ precisa se destacar da própria vizinhança. É este critério, e não
+#: o limiar absoluto, que separa uma pulsação do ruído vermelho. O valor não é
+#: escolhido a dedo: sob ruído branco a mediana de Z²₁ é 1,38, então exigir
+#: contraste 10 é dizer a mesma coisa que o limiar de 13,8 — só que medindo o
+#: nível de ruído onde ele está, em vez de supô-lo branco.
+FUNDAMENTAL_CONTRAST = 10.0
+
+
+@dataclass
+class Candidate:
+    """Um período candidato, com o que se sabe a favor e contra ele."""
+
+    period_s: float
+    power: float                 # potência no periodograma do powspec
+    fundamental: float           # Z²₁ — potência no componente fundamental
+    neighbourhood: float         # Z²₁ típico em volta, que calibra o de cima
+    h_statistic: float
+    harmonics: int
+
+    def contrast(self) -> float:
+        """Quantas vezes Z²₁ supera o nível da vizinhança."""
+        return self.fundamental / max(self.neighbourhood, 1e-9)
+
+    def has_fundamental(self) -> bool:
+        """Se há potência no fundamental que a vizinhança não explique.
+
+        As duas condições são necessárias. O limiar absoluto sozinho aceita
+        ruído vermelho: numa curva de raios X a potência cresce para
+        frequências baixas, e Z²₁ chega a centenas em períodos de minutos sem
+        que haja pulsação nenhuma — medido na 0844140101, Z²₁ = 399 em 443 s,
+        contra uma vizinhança de 253. O contraste sozinho aceita flutuação em
+        região de pouca potência.
+        """
+        return (self.fundamental >= FUNDAMENTAL_THRESHOLD
+                and self.contrast() >= FUNDAMENTAL_CONTRAST)
+
+
+def _neighbourhood_z1(times: np.ndarray, frequency: float, span: float = 0.03,
+                      samples: int = 40) -> float:
+    """Z²₁ típico em torno de uma frequência, pulando o próprio pico."""
+    fraction = np.concatenate([
+        np.linspace(-span, -span / 4.0, max(samples // 2, 2)),
+        np.linspace(span / 4.0, span, max(samples // 2, 2))])
+    grid = frequency * (1.0 + fraction)
+    grid = grid[grid > 0.0]
+    if grid.size == 0:
+        return float("inf")
+    return float(np.median(z_squared_n(times, grid, harmonics=1)))
+
+
+def read_power_spectrum(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Frequência e potência do arquivo do ``powspec``.
+
+    Ao contrário do ``efsearch``, aqui há uma coluna ``FREQUENCY`` de verdade.
+    """
+    from astropy.io import fits
+
+    try:
+        with fits.open(path, memmap=False) as hdus:
+            data = hdus[1].data
+            frequency = np.asarray(data["FREQUENCY"], dtype=float).ravel()
+            power = np.asarray(data["POWER"], dtype=float).ravel()
+    except (OSError, KeyError, IndexError, ValueError):
+        return np.empty(0), np.empty(0)
+    finite = np.isfinite(frequency) & np.isfinite(power) & (frequency > 0.0)
+    return frequency[finite], power[finite]
+
+
+def blind_search(context: TaskContext, light_curve: LightCurve, times: np.ndarray,
+                 peaks: int = 30, subharmonics: int = 3,
+                 period_range: tuple[float, float] = (2.0, 500.0),
+                 ) -> list[Candidate]:
+    """Encontra o período sem candidato prévio: ``powspec`` mais desempate.
+
+    O periodograma sozinho erra, e erra com confiança. Num perfil de dois picos
+    por rotação a potência de Fourier vai para o **segundo** harmônico: medido
+    na 0844140101, o pico mais alto está em 5,155 s com potência 93, enquanto o
+    período verdadeiro, 10,317 s, aparece em quarto lugar com potência 16. Quem
+    pega o maior pico reporta metade do período.
+
+    Descer a escada de subharmônicos também não resolve: dobrar em 3P dá um
+    perfil que se repete três vezes, e o teste H acusa isso como significativo —
+    na mesma observação, 30,95 s dá H = 45.
+
+    O que separa os dois casos é a potência no componente **fundamental**, Z²₁.
+    No período verdadeiro ela é grande; num subharmônico é ruído, porque toda a
+    potência está em harmônicos altos. Medido: Z²₁ = 39,5 em 10,314 s contra
+    2,0 em 30,95 s. Entre os candidatos que têm fundamental, o verdadeiro é o de
+    **menor frequência** — os harmônicos de um fundamental real também têm
+    fundamental, os subharmônicos não.
+
+    São 30 picos, não os 5 mais altos: uma modulação fraca não encabeça o
+    periodograma. Medido na 0412601301, cuja fração pulsada é 1,3%, o pico
+    verdadeiro tem potência 33,7 e fica em 25º lugar entre 65 mil frequências.
+
+    E Z²₁ é comparado com a própria vizinhança, não com um limiar fixo. Numa
+    curva de raios X a potência cresce para frequências baixas, e um limiar
+    absoluto elege ruído vermelho: na mesma observação, Z²₁ = 399 em 443 s —
+    contra uma vizinhança de 253, ou seja, contraste 1,6. Em 10,314 s o
+    contraste é 22.
+    """
+    from scipy.stats import chi2 as _chi2
+
+    spectrum = power_spectrum(context, light_curve)
+    frequency, power = read_power_spectrum(spectrum)
+    if frequency.size == 0:
+        return []
+
+    low, high = 1.0 / period_range[1], 1.0 / period_range[0]
+    inside = (frequency >= low) & (frequency <= high)
+    frequency, power = frequency[inside], power[inside]
+    if frequency.size == 0:
+        return []
+
+    strongest = frequency[np.argsort(power)[::-1][:max(peaks, 1)]]
+    trials = sorted({float(f) / n for f in strongest
+                     for n in range(1, max(subharmonics, 1) + 1)})
+
+    found: list[Candidate] = []
+    for trial in trials:
+        if not (low <= trial <= high):
+            continue
+        grid = np.array([trial])
+        fundamental = float(z_squared_n(times, grid, harmonics=1)[0])
+        statistic, order = h_test(times, trial)
+        nearest = int(np.argmin(np.abs(frequency - trial)))
+        found.append(Candidate(period_s=1.0 / trial, power=float(power[nearest]),
+                               fundamental=fundamental,
+                               neighbourhood=_neighbourhood_z1(times, trial),
+                               h_statistic=statistic, harmonics=order))
+
+    # Ordena por contraste, não por período: "o mais longo entre os que têm
+    # fundamental" elege ruído vermelho, que também tem fundamental e vive nos
+    # períodos longos. Na 0844140101, essa regra escolhia 150 s (contraste 10,8)
+    # em vez de 10,314 s (contraste 22,5).
+    real = sorted((item for item in found if item.has_fundamental()),
+                  key=lambda item: item.contrast(), reverse=True)
+    rest = sorted((item for item in found if not item.has_fundamental()),
+                  key=lambda item: item.h_statistic, reverse=True)
+    if not real:
+        return rest
+
+    # E então sobe a escada: se 2P ou 3P também têm fundamental, o candidato era
+    # um harmônico. É o que separa 5,157 s de 10,314 s num perfil de dois picos.
+    best = real[0]
+    climbed = _climb_to_fundamental(times, 1.0 / best.period_s, frequency, power,
+                                    subharmonics)
+    if climbed is not None and abs(climbed.period_s - best.period_s) > 1e-9:
+        real = [climbed] + [item for item in real if item is not best] + [best]
+    return real + rest
+
+
+def _climb_to_fundamental(times: np.ndarray, frequency: float,
+                          spectrum_frequency: np.ndarray, spectrum_power: np.ndarray,
+                          subharmonics: int) -> "Candidate | None":
+    """Sobe de um harmônico para o fundamental, enquanto houver potência lá.
+
+    Um perfil de dois picos põe o máximo do periodograma no segundo harmônico.
+    Dobrar o período e reencontrar fundamental significa que se estava num
+    harmônico; não reencontrar significa que já se está no fundamental — que é
+    justamente o que impede a escada de descer para sempre pelos subharmônicos.
+    """
+    current = None
+    for _ in range(max(subharmonics, 1)):
+        candidate = None
+        for divisor in (2.0, 3.0):
+            trial = frequency / divisor
+            fundamental = float(z_squared_n(times, np.array([trial]), harmonics=1)[0])
+            neighbourhood = _neighbourhood_z1(times, trial)
+            statistic, order = h_test(times, trial)
+            nearest = int(np.argmin(np.abs(spectrum_frequency - trial))) \
+                if spectrum_frequency.size else 0
+            step = Candidate(period_s=1.0 / trial,
+                             power=float(spectrum_power[nearest])
+                             if spectrum_power.size else 0.0,
+                             fundamental=fundamental, neighbourhood=neighbourhood,
+                             h_statistic=statistic, harmonics=order)
+            if step.has_fundamental():
+                candidate = step
+                break
+        if candidate is None:
+            break
+        current, frequency = candidate, 1.0 / candidate.period_s
+    return current
 
 
 def _power_of_two(count: int, maximum: int = 1 << 20) -> int:

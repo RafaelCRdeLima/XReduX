@@ -84,6 +84,8 @@ class ReductionState:
     advised_harmonics: int | None = None
     #: O que o epatplot mediu sobre empilhamento.
     pileup: object = None
+    #: Períodos candidatos da busca ampla, o primeiro sendo o escolhido.
+    candidates: list = field(default_factory=list)
     fold_file: Path | None = None
 
     source_spectrum: spectra.Spectrum | None = None
@@ -472,6 +474,25 @@ class Pipeline:
             self.state.corrected_light_curve = timing.correct_light_curve(
                 self.context, curve.path, events, background.path)
         return curve
+
+    def find_period(self, period_range: tuple[float, float] = (2.0, 500.0)):
+        """Procura o período sem candidato prévio, com ``powspec``.
+
+        A busca por epoch folding varre uma vizinhança do que se digita — serve
+        para refinar, não para achar. Esta procura o campo todo.
+        """
+        if self.state.light_curve is None:
+            raise RuntimeError("extraia uma curva de luz antes de procurar o período")
+        if self.state.corrected_light_curve is not None:
+            self.state.light_curve.path = self.state.corrected_light_curve
+        table = self.state.source_event_list or self.state.barycentered
+        if table is None:
+            raise RuntimeError("é preciso ter eventos baricentrados")
+        times = timing.read_arrival_times(table, band_ev=self.state.light_curve.band_ev)
+        candidates = timing.blind_search(self.context, self.state.light_curve, times,
+                                         period_range=period_range)
+        self.state.candidates = candidates
+        return candidates
 
     def search_period(self, center_period_s: float, resolution_s: float | None = None,
                       trials: int = 401, phase_bins: int = 16) -> timing.PeriodSearch:
