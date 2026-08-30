@@ -39,6 +39,17 @@ def sanitise_name(name: str) -> str:
     return cleaned or "fonte-sem-nome"
 
 
+def file_stem(name: str, obsid: str) -> str:
+    r"""Prefixo de nome de arquivo com a fonte e a observação.
+
+    Sem espaços nem acentos: estes nomes acabam em ``\includegraphics`` e em
+    linhas de comando, onde um espaço vira dois argumentos.
+    """
+    compact = "".join(character for character in name
+                      if character.isalnum() or character in "+-.")
+    return f"{compact}_{obsid}" if compact else obsid
+
+
 def _key(name: str) -> str:
     """Forma comparável de um nome: sem espaços, sem caixa, sem pontuação."""
     return re.sub(r"[^a-z0-9+.-]", "", name.lower())
@@ -180,6 +191,41 @@ class Archive:
         directory = self.source_for(name, ra, dec).directory / obsid
         directory.mkdir(parents=True, exist_ok=True)
         return directory
+
+    def source_of(self, observation_dir: Path) -> Source | None:
+        """A fonte a que pertence uma observação já no disco.
+
+        É por aqui que o nome canônico chega às figuras e aos produtos: a sessão
+        guarda o nome que se usou no dia, que pode ser um apelido qualquer, e uma
+        figura de artigo precisa do nome que o arquivo considera o da fonte.
+        """
+        parent = Path(observation_dir).parent
+        if not (parent / DESCRIPTOR).is_file():
+            return None
+        return self._read(parent)
+
+    def rename(self, source: Source, name: str) -> Source:
+        """Renomeia a fonte, guardando o nome anterior como apelido.
+
+        O nome que vai no título de um artigo é escolha editorial — a mesma
+        fonte é RBS 1223 ou RX J1308.6+2127 conforme a revista — então o
+        arquivo aceita a troca em vez de impor o nome que veio primeiro.
+        """
+        label = sanitise_name(name)
+        if _key(label) == _key(source.name):
+            return source
+        aliases = [source.name, *source.aliases]
+        renamed = Source(directory=source.directory, name=label, ra=source.ra,
+                         dec=source.dec,
+                         aliases=[a for a in aliases if _key(a) != _key(label)])
+        destination = self.root / label
+        if destination != source.directory:
+            if destination.exists():
+                raise FileExistsError(f"já existe uma pasta chamada {label}")
+            source.directory.rename(destination)
+            renamed.directory = destination
+        renamed.save()
+        return renamed
 
     def locate(self, obsid: str) -> Path | None:
         """Onde uma observação está, seja sob uma fonte ou solta na raiz."""

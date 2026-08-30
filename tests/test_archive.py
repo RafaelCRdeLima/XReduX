@@ -10,7 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from xredux.archive import Archive, sanitise_name, separation_arcmin  # noqa: E402
+from xredux.archive import (Archive, file_stem, sanitise_name,  # noqa: E402
+                            separation_arcmin)
 
 
 class NameTest(unittest.TestCase):
@@ -93,6 +94,71 @@ class ArchiveTest(unittest.TestCase):
         odf.mkdir()
         (odf / "0123_0163560101_PNS00300IME.FIT").touch()
         self.assertEqual(source.odf_directory("0163560101"), odf)
+
+
+class FileStemTest(unittest.TestCase):
+    """Os nomes de arquivo vão para figuras e linhas de comando."""
+
+    def test_drops_spaces(self) -> None:
+        self.assertEqual(file_stem("RX J1856.5-3754", "0412601301"),
+                         "RXJ1856.5-3754_0412601301")
+
+    def test_keeps_the_plus_of_a_positive_declination(self) -> None:
+        self.assertEqual(file_stem("RX J1308.6+2127", "0844140101"),
+                         "RXJ1308.6+2127_0844140101")
+
+    def test_falls_back_to_the_obsid(self) -> None:
+        self.assertEqual(file_stem("", "0163560101"), "0163560101")
+
+
+class CanonicalNameTest(unittest.TestCase):
+    """O nome que encabeça uma figura vem do arquivo, não da sessão."""
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self._temporary.name)
+        self.archive = Archive(self.root)
+
+    def tearDown(self) -> None:
+        self._temporary.cleanup()
+
+    def test_observation_reports_the_source_it_belongs_to(self) -> None:
+        directory = self.archive.observation_dir("0844140101", "RX J1308.6+2127",
+                                                 197.2025, 21.4524)
+        source = self.archive.source_of(directory)
+        self.assertIsNotNone(source)
+        self.assertEqual(source.name, "RX J1308.6+2127")
+
+    def test_loose_observation_has_no_source(self) -> None:
+        (self.root / "0412601301").mkdir()
+        self.assertIsNone(self.archive.source_of(self.root / "0412601301"))
+
+    def test_rename_moves_the_folder_and_keeps_the_old_name(self) -> None:
+        directory = self.archive.observation_dir("0163560101", "RX J1308.6+2127",
+                                                 197.2025, 21.4524)
+        source = self.archive.source_of(directory)
+        renamed = self.archive.rename(source, "RBS 1223")
+
+        self.assertEqual(renamed.name, "RBS 1223")
+        self.assertEqual(renamed.directory, self.root / "RBS 1223")
+        self.assertIn("RX J1308.6+2127", renamed.aliases)
+        self.assertEqual(renamed.observations(), ["0163560101"])
+        self.assertFalse((self.root / "RX J1308.6+2127").exists())
+
+    def test_rename_keeps_the_position_so_matching_still_works(self) -> None:
+        self.archive.observation_dir("0163560101", "RX J1308.6+2127", 197.2025, 21.4524)
+        source = self.archive.sources()[0]
+        self.archive.rename(source, "RBS 1223")
+        later = self.archive.observation_dir("0844140101", "1RXS J130848.6+212708",
+                                             197.2029, 21.4522)
+        self.assertEqual(later.parent.name, "RBS 1223")
+
+    def test_rename_refuses_to_overwrite_another_source(self) -> None:
+        self.archive.observation_dir("0163560101", "RBS 1223", 197.2, 21.45)
+        self.archive.observation_dir("0412601301", "RX J1856.5-3754", 284.1, -37.9)
+        other = self.archive.find(name="RX J1856.5-3754")
+        with self.assertRaises(FileExistsError):
+            self.archive.rename(other, "RBS 1223")
 
 
 if __name__ == "__main__":

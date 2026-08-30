@@ -135,7 +135,9 @@ class AcquisitionPage(Page):
     def _choose_local(self) -> None:
         # O arquivo já sabe o que existe no disco; um navegador de arquivos cru
         # obrigava o usuário a lembrar onde cada ODF tinha sido guardado.
-        picker = ArchivePicker(self.window.settings.archive(), self)
+        pipeline = self.window.pipeline
+        picker = ArchivePicker(self.window.settings.archive(), self,
+                               open_observation=pipeline.work_dir if pipeline else None)
         if picker.exec() != QDialog.DialogCode.Accepted or picker.chosen is None:
             return
         path = picker.chosen

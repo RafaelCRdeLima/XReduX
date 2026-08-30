@@ -24,6 +24,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from xredux.archive import file_stem  # noqa: E402
 from xredux.config import Settings  # noqa: E402
 from xredux.tasks import timing  # noqa: E402
 
@@ -41,6 +42,8 @@ def parse_arguments() -> argparse.Namespace:
                         help="meia-largura da grade, em fração da frequência")
     parser.add_argument("--trials", type=int, default=4001)
     parser.add_argument("--phase-bins", type=int, default=16)
+    parser.add_argument("--source", help="nome da fonte no título "
+                        "(padrão: o nome canônico do arquivo)")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -48,7 +51,13 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = parse_arguments()
     settings = Settings.load()
-    work = settings.work_dir / arguments.obsid
+    archive = settings.archive()
+    work = archive.locate(arguments.obsid)
+    if work is None:
+        print(f"observação {arguments.obsid} não está no arquivo em {archive.root}")
+        return 1
+    source = archive.source_of(work)
+    source_name = arguments.source or (source.name if source else arguments.obsid)
     # A lista da região da fonte é a certa: sobre o campo inteiro o fundo dilui
     # a amplitude do pulso.
     events = arguments.events or next(
@@ -100,8 +109,8 @@ def main() -> int:
                 label=f"nível de ruído (2n = {2 * arguments.harmonics})")
     top.set_xlabel("Período (s)")
     top.set_ylabel(f"Z²$_{arguments.harmonics}$")
-    top.set_title(f"{arguments.obsid} · busca Z²ₙ sobre {times.size} eventos "
-                  f"({arguments.band[0]}–{arguments.band[1]} eV)")
+    top.set_title(f"busca Z²ₙ sobre {times.size} eventos "
+                  f"({arguments.band[0]}–{arguments.band[1]} eV)", fontsize=10)
     top.legend(fontsize=8)
     top.grid(alpha=0.25)
 
@@ -122,10 +131,17 @@ def main() -> int:
     else:
         label = (f"fração pulsada = ({fraction * 100:.2f} ± "
                  f"{uncertainty * 100:.2f})%")
-    bottom.set_title(f"Perfil de pulso · P = {refined.best_period_s:.5f} s · {label}")
+    bottom.set_title(f"Perfil de pulso · P = {refined.best_period_s:.5f} s · {label}",
+                     fontsize=10)
     bottom.grid(alpha=0.25)
 
-    output = arguments.output or work / f"{arguments.obsid}_timing.png"
+    # O nome da fonte encabeça a figura: é assim que ela é identificada num
+    # artigo, e uma figura solta com só o ObsID não diz de que objeto é.
+    figure.suptitle(f"{source_name} · XMM-Newton EPIC-pn · ObsID {arguments.obsid}",
+                    fontsize=13, fontweight="semibold")
+
+    stem = file_stem(source_name, arguments.obsid)
+    output = arguments.output or work / f"{stem}_timing.png"
     figure.savefig(output, dpi=140)
     print(f"figura em {output}")
     return 0
