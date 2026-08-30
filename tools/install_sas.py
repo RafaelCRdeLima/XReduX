@@ -48,7 +48,19 @@ CCF_EXPECTED_FILES = 500
 SYSTEM_PACKAGES = ["libncurses5", "libreadline8", "libgomp1", "libx11-6",
                    "libxext6", "gfortran", "perl"]
 #: Pacotes Python usados pelo XREDUX além dos que o ambiente já traz.
-PYTHON_PACKAGES = ["astroquery"]
+#: Pacotes que as tarefas do SAS importam e que não vêm com o ambiente.
+#:
+#: ``sas_python_packages.txt`` também pede ``PyQt5``, ``pyds9``, ``notebook`` e
+#: ``pytest``, que ficam de fora de propósito. O PyQt5 é o caso sério: a
+#: interface do XREDUX roda em PySide6 **no mesmo ambiente**, e dois bindings
+#: Qt no mesmo processo disputam plugins de plataforma e biblioteca — nada que
+#: se queira num programa que já foi ao chão por causa de Qt. Os outros três
+#: servem a ferramentas interativas do SAS que o pipeline não usa.
+PYTHON_PACKAGES = [
+    "astroquery",       # busca no XSA
+    "beautifultable",   # pysas.param, exigido pelo epatplot
+    "PyPDF2",           # montagem dos gráficos em PDF
+]
 
 
 def note(message: str) -> None:

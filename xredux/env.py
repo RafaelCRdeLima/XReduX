@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,6 +94,23 @@ class SasEnvironment:
 _CACHE: dict[tuple[str, str, str], SasEnvironment] = {}
 
 
+def _with_interpreter(path: str, sas_dir: Path, headas: Path) -> str:
+    """Insere o interpretador do XREDUX no PATH, atrás só do SAS e do HEASoft.
+
+    Atrás deles porque as tarefas do SAS têm de resolver para os binários do
+    SAS; à frente de todo o resto porque é este interpretador que tem astropy —
+    o XREDUX depende dela, então a garantia é a mesma que sustenta o programa.
+    """
+    interpreter = str(Path(sys.executable).resolve().parent)
+    entries = [item for item in path.split(os.pathsep) if item and item != interpreter]
+    owned = (str(sas_dir), str(headas))
+    index = 0
+    while index < len(entries) and entries[index].startswith(owned):
+        index += 1
+    entries.insert(index, interpreter)
+    return os.pathsep.join(entries)
+
+
 def build(settings: Settings, refresh: bool = False) -> SasEnvironment:
     """Prepara (e memoriza) o ambiente SAS+HEASoft descrito por ``settings``."""
     if settings.sas_dir is None or not Path(settings.sas_dir).is_dir():
@@ -124,6 +142,20 @@ def build(settings: Settings, refresh: bool = False) -> SasEnvironment:
         'source "$SAS_DIR/setsas.sh" > /dev/null',
     ])
     environment = _capture_shell_env(script)
+
+    # Vários auxiliares do SAS são scripts Python com shebang
+    # ``#!/usr/bin/env python`` e importam astropy — o ``epatplot_graph.py``,
+    # que desenha o diagnóstico de pile-up, é um deles. Sem forçar o
+    # interpretador aqui, o ``python`` do PATH acaba sendo o do sistema, sem
+    # astropy, e a tarefa morre com ModuleNotFoundError **depois** de já ter
+    # feito o trabalho pesado.
+    environment["PATH"] = _with_interpreter(environment.get("PATH", ""),
+                                            sas_dir, headas)
+
+    # Os auxiliares do SAS carregavam matplotlib de ~/.local/lib, e não do
+    # ambiente: um pacote instalado ali pelo usuário passa na frente e quebra
+    # tarefas do SAS de um jeito que não se relaciona com nada que se fez.
+    environment["PYTHONNOUSERSITE"] = "1"
 
     # Sem isto as tarefas do SAS abrem prompts interativos e travam a interface.
     environment["SAS_CCFPATH"] = str(ccf_path)
