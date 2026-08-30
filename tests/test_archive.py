@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from xredux.archive import (Archive, file_stem, sanitise_name,  # noqa: E402
-                            separation_arcmin)
+from xredux.archive import (Archive, compact_name, file_stem,  # noqa: E402
+                            sanitise_name, separation_arcmin)
 
 
 class NameTest(unittest.TestCase):
@@ -49,9 +49,11 @@ class ArchiveTest(unittest.TestCase):
         second = self.archive.observation_dir("0844140101", "RBS1223",
                                               197.2029, 21.4522)
         self.assertEqual(first.parent, second.parent)
-        self.assertEqual(first.parent.name, "RX J1308.6+2127")
+        # A pasta usa a forma compacta; o nome legível fica no descritor.
+        self.assertEqual(first.parent.name, "RXJ1308.6+2127")
 
         stored = json.loads((first.parent / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["name"], "RX J1308.6+2127")
         self.assertEqual(stored["aliases"], ["RBS1223"])
 
     def test_distinct_sources_stay_apart(self) -> None:
@@ -140,10 +142,10 @@ class CanonicalNameTest(unittest.TestCase):
         renamed = self.archive.rename(source, "RBS 1223")
 
         self.assertEqual(renamed.name, "RBS 1223")
-        self.assertEqual(renamed.directory, self.root / "RBS 1223")
+        self.assertEqual(renamed.directory, self.root / "RBS1223")
         self.assertIn("RX J1308.6+2127", renamed.aliases)
         self.assertEqual(renamed.observations(), ["0163560101"])
-        self.assertFalse((self.root / "RX J1308.6+2127").exists())
+        self.assertFalse((self.root / "RXJ1308.6+2127").exists())
 
     def test_rename_keeps_the_position_so_matching_still_works(self) -> None:
         self.archive.observation_dir("0163560101", "RX J1308.6+2127", 197.2025, 21.4524)
@@ -151,7 +153,8 @@ class CanonicalNameTest(unittest.TestCase):
         self.archive.rename(source, "RBS 1223")
         later = self.archive.observation_dir("0844140101", "1RXS J130848.6+212708",
                                              197.2029, 21.4522)
-        self.assertEqual(later.parent.name, "RBS 1223")
+        self.assertEqual(later.parent.name, "RBS1223")
+        self.assertEqual(self.archive.source_of(later).name, "RBS 1223")
 
     def test_rename_refuses_to_overwrite_another_source(self) -> None:
         self.archive.observation_dir("0163560101", "RBS 1223", 197.2, 21.45)
@@ -159,6 +162,59 @@ class CanonicalNameTest(unittest.TestCase):
         other = self.archive.find(name="RX J1856.5-3754")
         with self.assertRaises(FileExistsError):
             self.archive.rename(other, "RBS 1223")
+
+
+class PathSafetyTest(unittest.TestCase):
+    """O SAS descarta o espaço no meio de um caminho.
+
+    Um diretório ``RX J1308.6+2127`` chega ao odfingest como
+    ``RXJ1308.6+2127`` e a tarefa falha dizendo que o ODF não existe. O nome
+    legível fica no source.json; o caminho nunca tem espaço.
+    """
+
+    def test_compact_name_removes_spaces(self) -> None:
+        self.assertEqual(compact_name("RX J1308.6+2127"), "RXJ1308.6+2127")
+
+    def test_compact_name_keeps_catalogue_punctuation(self) -> None:
+        self.assertEqual(compact_name("RX J1856.5-3754"), "RXJ1856.5-3754")
+
+    def test_no_archived_path_ever_contains_a_space(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Archive(Path(directory))
+            work = archive.observation_dir("0844140101", "RX J1308.6+2127",
+                                           197.2025, 21.4524)
+            self.assertNotIn(" ", str(work.relative_to(directory)))
+
+    def test_readable_name_survives_in_the_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Archive(Path(directory))
+            work = archive.observation_dir("0844140101", "RX J1308.6+2127",
+                                           197.2025, 21.4524)
+            source = archive.source_of(work)
+            self.assertEqual(source.name, "RX J1308.6+2127")
+            self.assertEqual(source.directory.name, "RXJ1308.6+2127")
+
+    def test_rename_also_yields_a_path_without_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Archive(Path(directory))
+            work = archive.observation_dir("0163560101", "RBS1223", 197.2, 21.45)
+            renamed = archive.rename(archive.source_of(work), "RX J1308.6+2127")
+            self.assertEqual(renamed.name, "RX J1308.6+2127")
+            self.assertEqual(renamed.directory.name, "RXJ1308.6+2127")
+            self.assertEqual(renamed.observations(), ["0163560101"])
+
+    def test_folders_with_spaces_are_reported_for_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "RX J1308.6+2127").mkdir()
+            (root / "RX J1308.6+2127" / "source.json").write_text(
+                '{"name": "RX J1308.6+2127"}', encoding="utf-8")
+            (root / "RXJ1856.5-3754").mkdir()
+            (root / "RXJ1856.5-3754" / "source.json").write_text(
+                '{"name": "RX J1856.5-3754"}', encoding="utf-8")
+
+            misnamed = Archive(root).misnamed()
+            self.assertEqual([s.directory.name for s in misnamed], ["RX J1308.6+2127"])
 
 
 if __name__ == "__main__":

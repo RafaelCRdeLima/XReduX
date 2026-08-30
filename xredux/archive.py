@@ -39,14 +39,25 @@ def sanitise_name(name: str) -> str:
     return cleaned or "fonte-sem-nome"
 
 
-def file_stem(name: str, obsid: str) -> str:
-    r"""Prefixo de nome de arquivo com a fonte e a observação.
+def compact_name(name: str) -> str:
+    r"""Forma do nome utilizável em caminho de arquivo: sem espaços.
 
-    Sem espaços nem acentos: estes nomes acabam em ``\includegraphics`` e em
+    **As tarefas do SAS descartam o espaço no meio de um caminho.** Um diretório
+    ``RX J1308.6+2127`` chega ao ``odfingest`` como ``RXJ1308.6+2127``, e a
+    tarefa falha dizendo que o arquivo não existe — sem nenhuma pista de que o
+    problema foi o espaço. Por isso o nome legível vive no ``source.json`` e
+    nunca no caminho.
+
+    Serve também para nomes de arquivo, que acabam em ``\includegraphics`` e em
     linhas de comando, onde um espaço vira dois argumentos.
     """
-    compact = "".join(character for character in name
-                      if character.isalnum() or character in "+-.")
+    return "".join(character for character in name
+                   if character.isalnum() or character in "+-._")
+
+
+def file_stem(name: str, obsid: str) -> str:
+    """Prefixo de nome de arquivo com a fonte e a observação."""
+    compact = compact_name(name)
     return f"{compact}_{obsid}" if compact else obsid
 
 
@@ -64,7 +75,11 @@ def separation_arcmin(ra1: float, dec1: float, ra2: float, dec2: float) -> float
 
 @dataclass
 class Source:
-    """Uma fonte no arquivo, com as observações que já estão no disco."""
+    """Uma fonte no arquivo, com as observações que já estão no disco.
+
+    ``name`` é o nome legível, que vai aos títulos das figuras; ``directory``
+    usa a forma compacta, porque o SAS não lida com espaços em caminhos.
+    """
 
     directory: Path
     name: str
@@ -173,7 +188,8 @@ class Archive:
                 existing.remember(name, ra, dec)
             return existing
         label = sanitise_name(name or "fonte-sem-nome")
-        source = Source(directory=self.root / label, name=label, ra=ra, dec=dec)
+        source = Source(directory=self.root / compact_name(label), name=label,
+                        ra=ra, dec=dec)
         if create:
             source.save()
         return source
@@ -218,7 +234,7 @@ class Archive:
         renamed = Source(directory=source.directory, name=label, ra=source.ra,
                          dec=source.dec,
                          aliases=[a for a in aliases if _key(a) != _key(label)])
-        destination = self.root / label
+        destination = self.root / compact_name(label)
         if destination != source.directory:
             if destination.exists():
                 raise FileExistsError(f"já existe uma pasta chamada {label}")
@@ -226,6 +242,15 @@ class Archive:
             renamed.directory = destination
         renamed.save()
         return renamed
+
+    def misnamed(self) -> list[Source]:
+        """Fontes cuja pasta ainda tem espaço no nome.
+
+        Existiram enquanto o diretório usava o nome legível; qualquer tarefa do
+        SAS sobre elas falha, então precisam ser renomeadas.
+        """
+        return [source for source in self.sources()
+                if source.directory.name != compact_name(source.directory.name)]
 
     def locate(self, obsid: str) -> Path | None:
         """Onde uma observação está, seja sob uma fonte ou solta na raiz."""

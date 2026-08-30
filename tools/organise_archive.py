@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from xredux.archive import Archive  # noqa: E402
+from xredux.archive import Archive, compact_name  # noqa: E402
 from xredux.config import Settings  # noqa: E402
 
 
@@ -69,9 +69,32 @@ def main() -> int:
 
     root = arguments.root or Settings.load().work_dir
     archive = Archive(root)
+
+    # Pastas com espaço no nome quebram toda tarefa do SAS: o odfingest recebe
+    # o caminho sem o espaço e não acha o ODF.
+    for source in archive.misnamed():
+        target = root / compact_name(source.directory.name)
+        print(f"espaço no nome da pasta: {source.directory.name} -> {target.name}")
+        if not arguments.apply:
+            continue
+        if target.exists():
+            print("    já existe no destino; nada feito")
+            continue
+        origin = source.directory
+        origin.rename(target)
+        source.directory = target
+        source.save()
+        for observation in target.iterdir():
+            if observation.is_dir():
+                _repoint(observation, origin, target)
+        print("    renomeada")
+
     loose = archive.legacy_observations()
     if not loose:
-        print(f"Nada a reorganizar em {root}.")
+        if not arguments.apply and archive.misnamed():
+            print("\nPlano apenas. Repita com --apply para aplicar.")
+        else:
+            print(f"Nada mais a reorganizar em {root}.")
         return 0
 
     # As fontes ainda por criar entram num plano em memória: sem isso, duas
