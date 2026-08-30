@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHeaderView, QLabel
                                QPushButton, QTableWidget, QTableWidgetItem)
 
 from ...i18n import t
-from .base import Page, row
+from .base import Page, row, rebuilding
 
 
 class ProcessingPage(Page):
@@ -71,20 +71,21 @@ class ProcessingPage(Page):
     def _show_events(self) -> None:
         pipeline = self.window.pipeline
         events = pipeline.state.event_lists if pipeline else []
-        self._table.setRowCount(len(events))
-        for index, item in enumerate(events):
-            values = [
-                item.instrument, item.mode or "—", item.filter_name or "—",
-                f"{item.ontime_s / 1000:.1f}" if item.ontime_s else "—",
-                f"{item.time_resolution_us():g}",
-            ]
-            for column, value in enumerate(values):
-                self._table.setItem(index, column, QTableWidgetItem(value))
-        if events and pipeline.state.selected is not None:
-            try:
-                self._table.selectRow(events.index(pipeline.state.selected))
-            except ValueError:
-                self._table.selectRow(0)
+        with rebuilding(self._table):
+            self._table.setRowCount(len(events))
+            for index, item in enumerate(events):
+                values = [
+                    item.instrument, item.mode or "—", item.filter_name or "—",
+                    f"{item.ontime_s / 1000:.1f}" if item.ontime_s else "—",
+                    f"{item.time_resolution_us():g}",
+                ]
+                for column, value in enumerate(values):
+                    self._table.setItem(index, column, QTableWidgetItem(value))
+            if events and pipeline.state.selected is not None:
+                try:
+                    self._table.selectRow(events.index(pipeline.state.selected))
+                except ValueError:
+                    self._table.selectRow(0)
         self.window.refresh_pages()
 
     def _select_event_list(self) -> None:
