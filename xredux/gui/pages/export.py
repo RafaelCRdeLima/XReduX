@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QPushButton, QSpi
 from ...export import profile as profile_export
 from ...export import pulsaris as pulsaris_export
 from ...archive import file_stem
+from ...export import latex as latex_export
 from ...i18n import t
 from ...tasks import absorption
 from .base import Page, row
@@ -43,6 +44,9 @@ class ExportPage(Page):
         self._install_button.setEnabled(False)
         self._install_button.clicked.connect(self._install)
 
+        self._latex_button = QPushButton(self)
+        self._latex_button.clicked.connect(self._export_latex)
+
         self._report = QTextEdit(self)
         self._report.setReadOnly(True)
 
@@ -50,13 +54,44 @@ class ExportPage(Page):
                                   self._high_label, self._high, self._limit))
         self.body().addLayout(row(self._csv_button, self._profile_button,
                                   self._install_button))
+        self.body().addLayout(row(self._latex_button))
         self.body().addWidget(self._report, 1)
 
     def controls(self):
         return [self._low, self._high, self._limit, self._csv_button,
-                self._profile_button, self._install_button]
+                self._profile_button, self._install_button, self._latex_button]
 
     # -- CSV de eventos ---------------------------------------------------
+
+    def _export_latex(self) -> None:
+        """Escreve a seção "Observations and data reduction" do artigo.
+
+        Só afirma o que a sessão registra: uma etapa que não rodou não vira
+        frase. O que não foi medido sai como ``\\textbf{??}``, que salta aos
+        olhos no PDF em vez de passar por um número plausível.
+        """
+        pipeline = self.window.pipeline
+        if pipeline is None or pipeline.state.selected is None:
+            self.set_status(t("export.need_reduction"), "failed")
+            return
+        destino = pipeline.work_dir / f"{file_stem(pipeline.state.target, pipeline.state.obsid)}_observations.tex"
+
+        def work():
+            return latex_export.write(pipeline.state, pipeline.session,
+                                      self.window.settings, destino)
+
+        self.run_task(work, self._latex_done, t("export.writing_latex"),
+                      advance=False)
+
+    def _latex_done(self, produced) -> None:
+        section, bibliography = produced
+        faltando = latex_export.count_missing(section.read_text(encoding="utf-8"))
+        linhas = [t("export.latex_written", path=str(section),
+                    bib=bibliography.name)]
+        linhas.append(t("export.latex_missing", count=faltando) if faltando
+                      else t("export.latex_complete"))
+        self._report.append("\n".join(linhas))
+        self.set_status(t("status.done"), "done")
 
     def _export_csv(self) -> None:
         pipeline = self.window.pipeline
@@ -220,6 +255,7 @@ class ExportPage(Page):
         self._csv_button.setText(t("export.write_csv"))
         self._profile_button.setText(t("export.build_profile"))
         self._install_button.setText(t("export.install"))
+        self._latex_button.setText(t("export.latex"))
 
 
 def _profile_id(state) -> str:
