@@ -268,9 +268,17 @@ def check_pileup(context: TaskContext, events: EventList, source,
     # ele avisar "Only format supported now is pdf" e trocar a extensão sozinho.
     output = output or context.work_dir / f"{events.instrument.lower()}_pileup.pdf"
     selected = context.work_dir / f"{events.instrument.lower()}_pileup_evts.ds"
+    # Sem filtro de PATTERN, ao contrário de todas as outras seleções. É a
+    # distribuição de padrões que está sendo diagnosticada: cortar em
+    # PATTERN<=4 joga fora triplos e quádruplos, deixa o epatplot avisando
+    # "sigmaTooLarge, not enough statistics for PAT = 3" — porque não há
+    # nenhum — e desloca as próprias razões que se quer medir, já que elas são
+    # frações do total. Medido na 0844140101: com o corte, s 0,975 e d 1,125;
+    # sem ele, s 0,968 e d 1,115, com triplos em 0,39% e quádruplos em 0,10%.
+    #
+    # O FLAG==0 também sai: o epatplot o aplica por dentro (withflag=Y).
     expression = selection_expression([
-        events.quality_flag, "FLAG==0", f"PATTERN<={events.max_pattern}",
-        getattr(source, "expression", source),
+        events.quality_flag, getattr(source, "expression", source),
     ])
     context.sas(STEP_PILEUP, "evselect", {
         "table": f"{events.path}:EVENTS",
