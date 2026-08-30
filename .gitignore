@@ -1,0 +1,15 @@
+# Dados e software de terceiros, baixados por tools/install_sas.py.
+# Comentários precisam de linha própria: o git não os aceita ao lado do padrão.
+vendor/
+external/
+products/
+
+# Logs de execução
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Intermediários da geração do guia
+xredux/guide/img/*.png
