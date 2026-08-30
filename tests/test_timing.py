@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import math
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -332,6 +333,47 @@ class FoldRouteTest(unittest.TestCase):
         _, counts, error = timing.profile(times, 100.0, phase_bins=8)
         self.assertTrue((counts == 0).any())
         self.assertTrue((error > 0).all())
+
+
+class EfsearchParsingTest(unittest.TestCase):
+    """O efsearch grava uma linha por intervalo, não uma linha só."""
+
+    def _write(self, path, rows: int, trials: int = 401, peak: int = 200):
+        from astropy.io import fits
+
+        chi2 = np.full((rows, trials), 2.0, dtype=np.float32)
+        chi2[:, peak] = 50.0
+        column = fits.Column(name="CHISQRD1", format=f"{trials}E", array=chi2)
+        hdu = fits.BinTableHDU.from_columns([column], name="RESULTS")
+        hdu.header["1CRVL1"] = 10.0
+        hdu.header["1CRPX1"] = 1
+        hdu.header["1CDLT1"] = 0.001
+        fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
+
+    def test_a_single_interval_is_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "efsearch.fits"
+            self._write(path, rows=1)
+            periods, chi2 = timing._read_efsearch(path)
+            self.assertEqual(periods.size, 401)
+            self.assertEqual(chi2.size, 401)
+            self.assertAlmostEqual(periods[int(np.argmax(chi2))], 10.2, places=6)
+
+    def test_several_intervals_are_summed(self) -> None:
+        """Sem isto o índice do máximo cai fora e a busca levanta IndexError."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "efsearch.fits"
+            self._write(path, rows=2)
+            periods, chi2 = timing._read_efsearch(path)
+            self.assertEqual(chi2.size, 401)
+            self.assertEqual(periods.size, chi2.size)
+            self.assertAlmostEqual(float(chi2.max()), 100.0, places=4)
+            self.assertAlmostEqual(periods[int(np.argmax(chi2))], 10.2, places=6)
+
+    def test_a_missing_file_yields_nothing(self) -> None:
+        periods, chi2 = timing._read_efsearch(Path("/nao/existe/efsearch.fits"))
+        self.assertEqual(periods.size, 0)
+        self.assertEqual(chi2.size, 0)
 
 
 if __name__ == "__main__":

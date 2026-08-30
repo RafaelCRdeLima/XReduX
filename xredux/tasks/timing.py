@@ -221,6 +221,11 @@ def epoch_folding_search(context: TaskContext, light_curve: LightCurve,
         "sepoch=INDEF",
         f"dper={center_period_s:.12g}",
         f"nphase={phase_bins}",
+        # ``nbint=INDEF`` deixa o XRONOS dimensionar o intervalo, e é a opção
+        # que de fato mantém a observação num intervalo só. Medido nesta
+        # instalação: com ``nbint`` fixado no número de bins da curva, o
+        # efsearch parte em dois; e passar ``nintfm`` — de qualquer valor —
+        # faz a tarefa terminar com código 0 sem escrever arquivo nenhum.
         "nbint=INDEF",
         f"nper={trials}",
         f"dres={resolution_s:.12g}",
@@ -228,6 +233,11 @@ def epoch_folding_search(context: TaskContext, light_curve: LightCurve,
         f"outfile={output}",
         "outfiletype=1",
     ], cwd=context.work_dir, timeout=7200)
+    # O efsearch sai com código 0 mesmo quando não escreve nada — foi o que
+    # aconteceu ao passar-lhe ``nintfm``. Sem conferir o produto, a busca
+    # devolvia o período central de volta com χ² = NaN, como se tivesse
+    # procurado. Errar alto é melhor do que errar em silêncio.
+    context.require(output)
 
     periods, chi2 = _read_efsearch(output)
     if periods.size == 0:
@@ -241,9 +251,9 @@ def epoch_folding_search(context: TaskContext, light_curve: LightCurve,
 def _read_efsearch(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Lê a grade de períodos e o χ² do arquivo de resultados do ``efsearch``.
 
-    O XRONOS não grava uma linha por período tentado: grava **uma** linha cuja
-    coluna ``CHISQRD1`` é um vetor com toda a varredura, e descreve o eixo de
-    períodos em cartões WCS da própria coluna — ``1CRVLn``, ``1CRPXn`` e
+    O XRONOS não grava uma linha por período tentado: grava uma linha **por
+    intervalo**, cuja coluna ``CHISQRD1`` é um vetor com toda a varredura, e
+    descreve o eixo de períodos em cartões WCS da própria coluna — ``1CRVLn``, ``1CRPXn`` e
     ``1CDLTn``, onde ``n`` é o número da coluna. Procurar uma coluna chamada
     ``PERIOD`` não encontra nada, e o resultado sai ``NaN`` sem erro nenhum.
     """
@@ -260,8 +270,15 @@ def _read_efsearch(path: Path) -> tuple[np.ndarray, np.ndarray]:
             if index is None:
                 return np.empty(0), np.empty(0)
 
-            chi2 = np.atleast_1d(np.asarray(data[data.columns.names[index - 1]],
-                                            dtype=float).squeeze())
+            chi2 = np.asarray(data[data.columns.names[index - 1]], dtype=float)
+            # Uma linha por intervalo, quando o XRONOS parte a observação. Cada
+            # uma é uma varredura completa da grade de períodos, então somá-las
+            # recompõe o χ² total — graus de liberdade somam junto. O certo é
+            # não deixar partir (ver ``nintfm`` acima), mas um arquivo antigo,
+            # ou vindo de outro lugar, ainda tem de ser legível.
+            if chi2.ndim > 1:
+                chi2 = np.nansum(chi2.reshape(-1, chi2.shape[-1]), axis=0)
+            chi2 = np.atleast_1d(chi2.squeeze())
             if chi2.size == 0:
                 return np.empty(0), np.empty(0)
 
@@ -295,6 +312,7 @@ def fold_profile(context: TaskContext, light_curve: LightCurve, period_s: float,
         f"outfile={output}",
         "outfiletype=1",
     ], cwd=context.work_dir, timeout=3600)
+    context.require(output)
     return output
 
 
