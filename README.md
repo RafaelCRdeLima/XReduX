@@ -211,6 +211,26 @@ RBS 1223, cujo perfil tem dois picos por rotação, o fundamental dá 5,13% e o 
 dá **11,43%** — Z²₁ = 85 contra Z²₃ = 830, ou seja, quase 90% da potência está
 nos harmônicos que o fundamental ignora.
 
+## O que sai para o PULSARIS
+
+A aba de Exportação escreve, em `products/<fonte>/<ObsID>/pulsaris/`:
+
+| arquivo | o que é |
+|---|---|
+| `<fonte>_<ObsID>_<inst>_events.csv` | tempos baricentrados, PI e energia da região da fonte |
+| `<fonte>_<ObsID>_<inst>_background.csv` | fundo escalado pelo BACKSCAL |
+| `<fonte>_<ObsID>_<inst>.arf` | área efetiva da observação, do `arfgen` |
+| `<fonte>_<ObsID>_<inst>.rmf` | matriz de redistribuição, do `rmfgen` |
+| `profile/` | perfil pronto para **instalar** no PULSARIS |
+
+Tudo o que está solto em `pulsaris/` é entrada: abre-se no PULSARIS. O que está
+em `profile/` instala-se e nunca se abre — a distinção existe porque as duas
+coisas juntas na mesma pasta levam a selecionar o arquivo errado.
+
+O ARF e o RMF acompanham porque são dado da observação, do mesmo apontamento e
+da mesma região de extração que os eventos. O PULSARIS os aceita diretamente na
+tela de ajuste, o que dispensa instalar perfil nenhum.
+
 ## Seção do artigo
 
 **Seção do artigo (LaTeX)**, na aba de Exportação, escreve a seção
