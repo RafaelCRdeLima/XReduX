@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHeaderVie
 from ...i18n import t
 from ...tasks import acquisition
 from ..widgets.archive_picker import ArchivePicker
-from .base import Page, row
+from .base import Page, row, rebuilding
 
 
 class AcquisitionPage(Page):
@@ -81,22 +81,26 @@ class AcquisitionPage(Page):
 
     def _show_results(self, results) -> None:
         self._results = list(results)
-        self._table.setRowCount(len(self._results))
-        for index, observation in enumerate(self._results):
-            values = [
-                observation.obsid,
-                observation.target,
-                observation.start_utc[:19],
-                f"{observation.duration_s / 1000:.1f}" if observation.duration_s else "",
-                f"{observation.ra:.4f} {observation.dec:+.4f}"
-                if observation.ra is not None else "",
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter)
-                self._table.setItem(index, column, item)
+        with rebuilding(self._table):
+            self._table.setRowCount(len(self._results))
+            for index, observation in enumerate(self._results):
+                values = [
+                    observation.obsid,
+                    observation.target,
+                    observation.start_utc[:19],
+                    f"{observation.duration_s / 1000:.1f}" if observation.duration_s else "",
+                    f"{observation.ra:.4f} {observation.dec:+.4f}"
+                    if observation.ra is not None else "",
+                ]
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter)
+                    self._table.setItem(index, column, item)
+            if self._results:
+                self._table.selectRow(0)
+        # Os sinais estavam silenciados: o botão precisa ser acertado à mão.
+        self._selection_changed()
         if self._results:
-            self._table.selectRow(0)
             self.set_status(t("acquisition.found", count=len(self._results)), "idle")
         else:
             self.set_status(t("acquisition.not_found"), "failed")

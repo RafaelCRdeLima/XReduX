@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDoubleSpinBox, QHeaderView, Q
                                QPushButton, QTableWidget, QTableWidgetItem)
 
 from ...i18n import t
-from .base import Page, row
+from .base import Page, row, rebuilding
 
 
 class CalibrationPage(Page):
@@ -68,12 +68,13 @@ class CalibrationPage(Page):
         if setup.dec is not None:
             self._dec.setValue(setup.dec)
 
-        self._table.setRowCount(len(setup.exposures))
-        for index, exposure in enumerate(setup.exposures):
-            values = [exposure.instrument, exposure.exposure_id, exposure.mode,
-                      t("calibration.fast") if exposure.is_fast else ""]
-            for column, value in enumerate(values):
-                self._table.setItem(index, column, QTableWidgetItem(value))
+        with rebuilding(self._table):
+            self._table.setRowCount(len(setup.exposures))
+            for index, exposure in enumerate(setup.exposures):
+                values = [exposure.instrument, exposure.exposure_id, exposure.mode,
+                          t("calibration.fast") if exposure.is_fast else ""]
+                for column, value in enumerate(values):
+                    self._table.setItem(index, column, QTableWidgetItem(value))
         self.window.refresh_pages()
 
     def _save_coordinates(self) -> None:

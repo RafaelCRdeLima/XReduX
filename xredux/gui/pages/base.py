@@ -7,6 +7,7 @@ controles enquanto algo roda e mostrar o estado da etapa.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Callable
 
 from PySide6.QtCore import Qt, Signal, Slot
@@ -189,6 +190,28 @@ class Page(QWidget):
 
     def retranslate_body(self) -> None:
         """Traduz os controles próprios da página."""
+
+
+@contextmanager
+def rebuilding(table):
+    """Reconstrói uma tabela com os sinais dela silenciados.
+
+    ``setRowCount`` remove linhas, e cada remoção destrói a seleção e emite
+    ``itemSelectionChanged`` **de dentro** de ``QTableModel::removeRows``. Se o
+    handler dessa seleção mexer na tabela de novo — direta ou indiretamente, por
+    um ``refresh_pages()`` que volte a preenchê-la — o modelo é alterado enquanto
+    o Qt ainda o percorre, e o processo morre com SIGSEGV em
+    ``QTableModel::removeRows``. Não é hipótese: foi o que fechou o programa na
+    página de Processamento.
+
+    Silenciar os sinais durante a reconstrução corta o laço na origem. A seleção
+    é reposta a partir do estado do pipeline, que é a fonte da verdade.
+    """
+    table.blockSignals(True)
+    try:
+        yield table
+    finally:
+        table.blockSignals(False)
 
 
 def row(*widgets: QWidget, stretch_last: bool = False) -> QHBoxLayout:
