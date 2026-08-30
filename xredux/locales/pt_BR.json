@@ -191,5 +191,8 @@
   "regions.source": "Fonte",
   "regions.background": "Fundo",
   "filtering.quiescent_label": "quiescente {value} ct/s",
-  "filtering.bin_too_small": "O bin é curto demais: o ruído sozinho cruza o corte. Use pelo menos {binsize} s."
+  "filtering.bin_too_small": "O bin é curto demais: o ruído sozinho cruza o corte. Use pelo menos {binsize} s.",
+  "timing.search_unconfirmed": "O pico NÃO se confirma nos tempos não binados (teste H: p = {probability}). Provável alias da grade da curva: verifique se o período é múltiplo do bin.",
+  "timing.search_unconfirmed_short": "Pico não confirmado — provável alias de binagem",
+  "timing.search_confirmed": "Confirmado nos tempos não binados (p = {probability})."
 }

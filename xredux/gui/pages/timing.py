@@ -144,12 +144,24 @@ class TimingPage(Page):
         self.run_task(work, self._search_done, t("timing.searching"), advance=False)
 
     def _search_done(self, result) -> None:
+        pipeline = self.window.pipeline
         self._period.setValue(result.best_period_s)
         self._search_plot.show_search(result.periods, result.values,
                                       result.best_period_s, result.method)
-        self._results.setText(t("timing.search_result",
-                                period=f"{result.best_period_s:.9g}",
-                                statistic=f"{result.statistic:.1f}"))
+        message = t("timing.search_result", period=f"{result.best_period_s:.9g}",
+                    statistic=f"{result.statistic:.1f}")
+        # O pico do epoch folding pode ser alias da grade da curva binada. Os
+        # tempos não binados dizem se há modulação de verdade.
+        confirmed = pipeline.state.search_confirmed if pipeline else None
+        probability = pipeline.state.search_probability if pipeline else None
+        if confirmed is False:
+            message += "\n" + t("timing.search_unconfirmed",
+                                 probability=f"{probability:.2g}")
+            self.set_status(t("timing.search_unconfirmed_short"), "failed")
+        elif confirmed:
+            message += " " + t("timing.search_confirmed",
+                               probability=f"{probability:.1e}")
+        self._results.setText(message)
 
     def _refine(self) -> None:
         pipeline = self.window.pipeline

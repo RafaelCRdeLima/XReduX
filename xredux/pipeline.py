@@ -70,6 +70,8 @@ class ReductionState:
     light_curve: timing.LightCurve | None = None
     corrected_light_curve: Path | None = None
     period_search: timing.PeriodSearch | None = None
+    search_confirmed: bool | None = None
+    search_probability: float | None = None
     refined: timing.PeriodSearch | None = None
     period_s: float | None = None
     h_statistic: float | None = None
@@ -440,6 +442,11 @@ class Pipeline:
         """Busca ampla por *epoch folding* com ``efsearch``."""
         if self.state.light_curve is None:
             raise RuntimeError("extraia uma curva de luz antes de buscar o período")
+        # A curva corrigida pelo epiclccorr carrega a informação de exposição por
+        # bin; na crua, os intervalos que o GTI removeu entram como zeros
+        # verdadeiros e inflam o χ² do epoch folding.
+        if self.state.corrected_light_curve is not None:
+            self.state.light_curve.path = self.state.corrected_light_curve
         if resolution_s is None:
             # Uma resolução da ordem de P²/(N·T) amostra o pico sem varrer o vazio.
             span = float(self.state.light_curve.time[-1] - self.state.light_curve.time[0])
@@ -449,7 +456,29 @@ class Pipeline:
             resolution_s=resolution_s, trials=trials, phase_bins=phase_bins)
         self.state.period_search = result
         self.state.period_s = result.best_period_s
+        self._confirm(result.best_period_s)
         return result
+
+    def _confirm(self, period_s: float) -> None:
+        """Confere o pico do efsearch contra os tempos de chegada não binados.
+
+        O epoch folding trabalha sobre a curva binada e é vulnerável a alias: um
+        período múltiplo exato do bin — 7,0000 s numa curva de 0,5 s, por exemplo
+        — faz a estrutura da própria grade dobrar coerentemente e produz um pico
+        alto de χ² sem nenhuma modulação real. Os tempos de chegada não têm
+        grade, então o teste H sobre eles distingue as duas coisas.
+        """
+        table = self.state.source_event_list or self.state.barycentered
+        if table is None or not period_s:
+            return
+        band = self.state.light_curve.band_ev if self.state.light_curve else None
+        times = timing.read_arrival_times(table, band_ev=band)
+        if times.size == 0:
+            return
+        statistic, _ = timing.h_test(times, 1.0 / period_s)
+        probability = timing.h_test_probability(statistic)
+        self.state.search_probability = probability
+        self.state.search_confirmed = probability < 1.0e-3
 
     def refine_period(self, band_ev: tuple[int, int] | None = None,
                       harmonics: int = 2, trials: int = 2001,

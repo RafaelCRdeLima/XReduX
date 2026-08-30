@@ -98,6 +98,42 @@ class HTest(unittest.TestCase):
         self.assertGreater(timing.h_test_probability(statistic), 1e-4)
 
 
+class BinningAliasTest(unittest.TestCase):
+    """Um pico do epoch folding pode ser alias da grade da curva binada.
+
+    Reproduz o que apareceu em RBS 1223: o efsearch achou χ² = 259 em
+    7,000047 s — exatamente 14 bins de 0,5 s — enquanto os tempos de chegada
+    não binados davam p = 0,89, isto é, nada.
+    """
+
+    def test_h_test_rejects_a_period_with_no_modulation(self) -> None:
+        generator = np.random.default_rng(RNG_SEED + 21)
+        times = np.sort(generator.uniform(0.0, 7600.0, size=84_000))
+        statistic, _ = timing.h_test(times, 1.0 / 7.000047)
+        self.assertLess(statistic, 10.0)
+        self.assertGreater(timing.h_test_probability(statistic), 1.0e-3)
+
+    def test_h_test_accepts_a_real_signal_in_the_same_exposure(self) -> None:
+        """Mesma duração e contagem, agora com modulação injetada."""
+        times = modulated_events(10.3125, count=84_000, amplitude=0.05,
+                                 duration=7600.0, seed=RNG_SEED + 22)
+        statistic, _ = timing.h_test(times, 1.0 / 10.3125)
+        self.assertGreater(statistic, 30.0)
+        self.assertLess(timing.h_test_probability(statistic), 1.0e-3)
+
+    def test_the_threshold_separates_the_two_cases(self) -> None:
+        """O critério do programa: p < 1e-3 confirma, acima disso não."""
+        generator = np.random.default_rng(RNG_SEED + 23)
+        ruido = np.sort(generator.uniform(0.0, 7600.0, size=84_000))
+        sinal = modulated_events(10.3125, count=84_000, amplitude=0.05,
+                                 duration=7600.0, seed=RNG_SEED + 24)
+        limite = 1.0e-3
+        self.assertFalse(
+            timing.h_test_probability(timing.h_test(ruido, 1 / 7.000047)[0]) < limite)
+        self.assertTrue(
+            timing.h_test_probability(timing.h_test(sinal, 1 / 10.3125)[0]) < limite)
+
+
 class PulsedFractionTest(unittest.TestCase):
     """O estimador de Fourier recupera a amplitude injetada; o do histograma não."""
 
