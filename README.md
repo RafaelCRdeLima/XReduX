@@ -217,14 +217,21 @@ As observações ficam agrupadas pela fonte, não soltas pelo ObsID:
 
 ```
 products/
-  RX J1308.6+2127/
-    source.json          nome, coordenadas e apelidos da fonte
+  RXJ1308.6+2127/
+    source.json          nome legível, coordenadas e apelidos da fonte
     0163560101/
     0844140101/
-  RX J1856.5-3754/
+  RXJ1856.5-3754/
     source.json
     0412601301/
 ```
+
+**O caminho nunca tem espaço.** As tarefas do SAS descartam o espaço no meio de
+um caminho: um diretório `RX J1308.6+2127` chega ao `odfingest` como
+`RXJ1308.6+2127`, e a tarefa falha dizendo que o ODF não existe — sem nenhuma
+pista de que o problema foi o espaço. Por isso o nome legível vive no
+`source.json` e a pasta usa a forma compacta. O `tools/doctor.py` avisa se
+alguma pasta ou o próprio diretório de trabalho tiver espaço.
 
 O agrupamento é **por posição**, não por nome. A mesma fonte chega como
 `RBS1223` no sumário do ODF e como `RX J1308.6+2127` na busca por nome; casar
