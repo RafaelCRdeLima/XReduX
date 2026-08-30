@@ -18,7 +18,7 @@ from .config import Settings
 from .runner import ProcessRunner, TaskFailed
 from .session import Session
 from .tasks import acquisition, calibration, epic, filtering, om, regions, rgs, spectra, timing
-from .tasks.base import TaskContext
+from .tasks.base import TaskContext, newest
 from .tasks.epic import EventList
 from .tasks.regions import Region
 
@@ -141,6 +141,9 @@ class Pipeline:
         restored: list[str] = []
         session, work = self.session, self.work_dir
 
+        def _existing(path: Path) -> Path | None:
+            return path if path.is_file() else None
+
         def outputs(step: str) -> list[Path]:
             record = session.steps.get(step)
             return [Path(item) for item in (record.outputs if record else [])]
@@ -151,11 +154,22 @@ class Pipeline:
                 restored.append("ODF")
                 break
 
+        # Os produtos no disco valem mais que o registro da sessão: uma etapa
+        # pode falhar depois de gerá-los, ou ser refeita fora do fluxo gravado.
+        # Só a calibração dependia do registro, e um passo marcado como falho
+        # não registra saída nenhuma — a página abria vazia com o ccf.cif e o
+        # SUM.SAS ali do lado.
         cif = next((item for item in outputs("calibration")
-                    if item.suffix == ".cif" and item.is_file()), None)
+                    if item.suffix == ".cif" and item.is_file()),
+                   None) or _existing(work / "ccf.cif")
         summary = next((item for item in outputs("calibration")
-                        if item.name.endswith("SUM.SAS") and item.is_file()), None)
+                        if item.name.endswith("SUM.SAS") and item.is_file()),
+                       None) or newest(work, "*SUM.SAS")
         if cif and summary:
+            # Sem isto a etapa fica marcada com ✗ ao lado de uma página cheia,
+            # e o usuário refaz um trabalho que já está pronto.
+            if not session.is_done("calibration"):
+                session.finish("calibration", outputs=[cif, summary])
             self.context.env["SAS_CCF"] = str(cif)
             self.context.env["SAS_ODF"] = str(summary)
             setup = calibration.read_setup(self.context, cif, summary,
