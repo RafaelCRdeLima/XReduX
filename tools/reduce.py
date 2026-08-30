@@ -8,7 +8,7 @@ tarefas não depende do Qt.
     python tools/reduce.py --obsid 0412601301 --target "RX J1856.5-3754" \\
         --period 7.055 --band 150 1200
 
-A sessão é retomável: etapas já concluídas em ``products/<ObsID>/session.json``
+A sessão é retomável: etapas já concluídas em ``<fonte>/<ObsID>/session.json``
 não são refeitas, o que importa quando ``epproc`` leva uma hora.
 """
 
@@ -64,7 +64,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--skip-spectra", action="store_true")
     parser.add_argument("--export", action="store_true",
                         help="escreve o CSV de eventos e o perfil de instrumento "
-                             "em products/<ObsID>/pulsaris/")
+                             "no diretório da observação, em pulsaris/")
     parser.add_argument("--install-profile", action="store_true",
                         help="instala o perfil no repositório do PULSARIS "
                              "(ação explícita; implica --export)")
@@ -203,7 +203,13 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
 def main() -> int:
     arguments = parse_arguments()
     settings = Settings.load()
-    work = settings.observation_dir(arguments.obsid)
+    coordinates = (arguments.ra, arguments.dec)
+    if coordinates[0] is None and arguments.target:
+        try:
+            coordinates = acquisition.resolve_target(arguments.target)
+        except acquisition.ArchiveError:
+            coordinates = (None, None)
+    work = settings.observation_dir(arguments.obsid, arguments.target, *coordinates)
     session = Session.load_or_create(work, arguments.obsid, arguments.target)
 
     started = time.monotonic()
@@ -211,10 +217,9 @@ def main() -> int:
                         build_context(settings, session,
                                       on_line=lambda line: print("  " + line, flush=True)))
 
-    ra, dec = arguments.ra, arguments.dec
-    if ra is None and arguments.target:
-        ra, dec = acquisition.resolve_target(arguments.target)
-        report(f"{arguments.target}: AR={ra:.5f} Dec={dec:+.5f}")
+    ra, dec = coordinates
+    if ra is not None:
+        report(f"{arguments.target or arguments.obsid}: AR={ra:.5f} Dec={dec:+.5f}")
     pipeline.state.ra, pipeline.state.dec = ra, dec
     pipeline.state.target = arguments.target
 

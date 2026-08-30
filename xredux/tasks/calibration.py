@@ -84,17 +84,25 @@ _SUMMARY_LINE = re.compile(r"^(?P<value>.*?)\s+/\s+(?P<comment>.+?)\s*$")
 
 
 def read_setup(context: TaskContext, cif: Path, summary: Path, odf_dir: Path) -> ObservationSetup:
-    """Lê alvo, coordenadas e exposições a partir do sumário do ODF.
+    """Lê alvo, coordenadas e exposições a partir do sumário do ODF."""
+    setup = ObservationSetup(ccf_cif=cif, sum_sas=summary, odf_dir=odf_dir)
+    setup.target, setup.ra, setup.dec = read_target(summary)
+    setup.exposures = _read_exposures(odf_dir)
+    return setup
+
+
+def read_target(summary: Path) -> tuple[str, float | None, float | None]:
+    """Alvo e coordenadas do sumário do ODF, sem exigir CCF nem contexto.
 
     A ascensão reta vem do sumário **em horas**, não em graus. Usar o número como
     está aponta a extração para um ponto a dezenas de graus da fonte — e a
     redução termina sem erro nenhum, só sem a fonte.
     """
-    setup = ObservationSetup(ccf_cif=cif, sum_sas=summary, odf_dir=odf_dir)
+    target, ra, dec = "", None, None
     try:
         text = summary.read_text(encoding="latin-1", errors="replace")
     except OSError:
-        return setup
+        return target, ra, dec
 
     for line in text.splitlines():
         match = _SUMMARY_LINE.match(line.rstrip())
@@ -103,16 +111,14 @@ def read_setup(context: TaskContext, cif: Path, summary: Path, odf_dir: Path) ->
         value = match.group("value").strip()
         comment = match.group("comment").strip().lower()
 
-        if comment == "target name" and not setup.target:
-            setup.target = value
-        elif comment == "target right ascension" and setup.ra is None:
+        if comment == "target name" and not target:
+            target = value
+        elif comment == "target right ascension" and ra is None:
             hours = _as_float(value)
-            setup.ra = hours * 15.0 if hours is not None else None
-        elif comment == "target declination" and setup.dec is None:
-            setup.dec = _as_float(value)
-
-    setup.exposures = _read_exposures(odf_dir)
-    return setup
+            ra = hours * 15.0 if hours is not None else None
+        elif comment == "target declination" and dec is None:
+            dec = _as_float(value)
+    return target, ra, dec
 
 
 def _as_float(value: str) -> float | None:

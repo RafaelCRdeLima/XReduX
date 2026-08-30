@@ -131,12 +131,13 @@ class MainWindow(QMainWindow):
 
     # -- sessão -----------------------------------------------------------
 
-    def ensure_pipeline(self, obsid: str, target: str = "") -> Pipeline:
+    def ensure_pipeline(self, obsid: str, target: str = "",
+                        ra: float | None = None, dec: float | None = None) -> Pipeline:
         """Cria (ou reaproveita) a sessão e o pipeline da observação."""
         if self.pipeline is not None and self.pipeline.state.obsid == obsid:
             return self.pipeline
 
-        work_dir = self.settings.observation_dir(obsid)
+        work_dir = self.settings.observation_dir(obsid, target, ra, dec)
         self.session = Session.load_or_create(work_dir, obsid, target)
         context = build_context(self.settings, self.session, on_line=self._log)
         self.pipeline = Pipeline(self.settings, self.session, context)

@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHeaderView,
                                QLabel, QLineEdit, QPushButton, QTableWidget,
                                QTableWidgetItem)
 
 from ...i18n import t
 from ...tasks import acquisition
+from ..widgets.archive_picker import ArchivePicker
 from .base import Page, row
 
 
@@ -113,7 +114,11 @@ class AcquisitionPage(Page):
         observation = self._selected()
         if observation is None:
             return
-        pipeline = self.window.ensure_pipeline(observation.obsid, observation.target)
+        # O nome buscado é melhor rótulo que o alvo declarado no ODF, e a posição
+        # é o que de fato agrupa as observações de uma mesma fonte.
+        label = self._query.text().strip() or observation.target
+        pipeline = self.window.ensure_pipeline(observation.obsid, label,
+                                               observation.ra, observation.dec)
         if observation.ra is not None:
             pipeline.state.ra, pipeline.state.dec = observation.ra, observation.dec
 
@@ -128,12 +133,14 @@ class AcquisitionPage(Page):
         self.window.refresh_pages()
 
     def _choose_local(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, t("acquisition.pick_local"))
-        if not directory:
+        # O arquivo já sabe o que existe no disco; um navegador de arquivos cru
+        # obrigava o usuário a lembrar onde cada ODF tinha sido guardado.
+        picker = ArchivePicker(self.window.settings.archive(), self)
+        if picker.exec() != QDialog.DialogCode.Accepted or picker.chosen is None:
             return
-        path = Path(directory)
+        path = picker.chosen
         obsid = _guess_obsid(path)
-        pipeline = self.window.ensure_pipeline(obsid, "")
+        pipeline = self.window.ensure_pipeline(obsid, picker.chosen_source)
         try:
             pipeline.use_local_odf(path)
         except OSError as error:
