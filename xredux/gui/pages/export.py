@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QPushButton, QSpinBox,
@@ -144,6 +145,17 @@ class ExportPage(Page):
                     state.source_spectrum.path, state.background_spectrum.path,
                     rmf, background, band_ev=band)
                 extra["background_file"] = background.name
+
+            # O ARF e o RMF ao lado dos eventos: desde que o PULSARIS os aceita
+            # como entrada, eles são dado da observação e não subproduto. Ficavam
+            # na raiz com os nomes que o SAS deu — src.arf, src.rmf — e quem
+            # abria a pasta pulsaris/ não os encontrava.
+            for response, suffix in ((rmf, ".rmf"),
+                                     (state.source_spectrum.arf
+                                      if state.source_spectrum else None, ".arf")):
+                if response is not None and Path(response).is_file():
+                    shutil.copy(response, directory / f"{stem}_"
+                                f"{events.instrument.lower()}{suffix}")
 
             return pulsaris_export.write(
                 source, output, extra=extra,
