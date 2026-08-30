@@ -93,7 +93,12 @@ class ReductionState:
     phase_spectra: list[spectra.Spectrum] = field(default_factory=list)
 
     exported_csv: Path | None = None
+    #: Pacote do perfil de instrumento, para instalar no PULSARIS.
     profile_bundle: object | None = None
+    #: Perfil de pulso dobrado — (fase, contagens, erro). Nome distinto do
+    #: acima de propósito: os dois já colidiram, e um perfil de pulso chegando
+    #: ao instalador de perfis de instrumento não falha de modo óbvio.
+    pulse_profile: object | None = None
 
     def ready_for_timing(self) -> bool:
         return self.barycentered is not None and self.source_region is not None
@@ -612,7 +617,7 @@ class Pipeline:
 
         table = self.state.source_event_list or self.state.barycentered
         if table is not None:
-            self.state.profile_bundle = timing.fold_events(
+            self.state.pulse_profile = timing.fold_events(
                 self.context, table, self.state.period_s, phase_bins=phase_bins)
         return path
 

@@ -411,7 +411,7 @@ def _timing_paragraph(state, session) -> str:
                      f"$({100 * rms[0]:.2f} \\pm {100 * rms[1]:.2f})\\%$")
         lines.append(text + ".")
 
-    if getattr(state, "profile_bundle", None) is not None:
+    if getattr(state, "pulse_profile", None) is not None:
         lines.append(
             r"Pulse profiles were built by assigning a rotational phase to each "
             r"event with the \textsc{sas} task \texttt{phasecalc}, so that no "

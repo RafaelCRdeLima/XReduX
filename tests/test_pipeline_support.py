@@ -651,5 +651,28 @@ class SummaryRepointTest(unittest.TestCase):
             self.assertIn("PATH /antigo/odf", summary.read_text(encoding="latin-1"))
 
 
+class StateFieldTest(unittest.TestCase):
+    """Perfil de instrumento e perfil de pulso não podem dividir um campo.
+
+    Dividiram: o fold passou a escrever em ``profile_bundle``, que o botão de
+    instalar no PULSARIS lê esperando um pacote de resposta instrumental. Um
+    par (fase, contagens, erro) chegando ali não falha de modo óbvio.
+    """
+
+    def test_the_two_profiles_are_separate_fields(self) -> None:
+        from xredux.pipeline import ReductionState
+
+        state = ReductionState(obsid="0", target="alvo")
+        self.assertIsNone(state.profile_bundle)
+        self.assertIsNone(state.pulse_profile)
+
+        state.pulse_profile = ("fase", "contagens", "erro")
+        self.assertIsNone(state.profile_bundle,
+                          "dobrar o perfil não pode tocar no perfil de instrumento")
+
+        state.profile_bundle = "pacote do instrumento"
+        self.assertEqual(state.pulse_profile, ("fase", "contagens", "erro"))
+
+
 if __name__ == "__main__":
     unittest.main()

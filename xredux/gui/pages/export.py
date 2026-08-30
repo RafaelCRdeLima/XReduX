@@ -104,8 +104,14 @@ class ExportPage(Page):
         maximum = pulsaris_export.max_events_for_upload() if self._limit.isChecked() else None
         # O nome da fonte entra no arquivo: um CSV solto chamado só pelo ObsID
         # não diz de que objeto é quando chega ao ajuste, meses depois.
+        # Em pulsaris/, junto do fundo: é a pasta que o usuário abre quando vai
+        # procurar "os dados exportados para o PULSARIS", e achar só o perfil do
+        # instrumento ali leva a selecionar o arquivo errado — que falha com uma
+        # mensagem que parece a dica de sempre.
         stem = file_stem(state.target, state.obsid)
-        output = pipeline.work_dir / f"{stem}_{events.instrument.lower()}_pulsaris_events.csv"
+        directory = pipeline.work_dir / "pulsaris"
+        directory.mkdir(parents=True, exist_ok=True)
+        output = directory / f"{stem}_{events.instrument.lower()}_events.csv"
         rmf = state.source_spectrum.rmf if state.source_spectrum else None
         region = state.source_region.description if state.source_region else ""
 
@@ -172,7 +178,9 @@ class ExportPage(Page):
 
         events = state.selected
         pulsaris_root = Path(self.window.settings.pulsaris_root)
-        output_dir = pipeline.work_dir / "pulsaris"
+        # Numa subpasta: estes arquivos são instalados no PULSARIS, não abertos
+        # por ele, e misturá-los com a lista de eventos é o que confunde.
+        output_dir = pipeline.work_dir / "pulsaris" / "profile"
         identifier = _profile_id(state)
         band = (self._low.value() / 1000.0, self._high.value() / 1000.0)
         spectrum = state.source_spectrum
