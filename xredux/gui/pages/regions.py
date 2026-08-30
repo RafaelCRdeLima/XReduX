@@ -139,7 +139,10 @@ class RegionsPage(Page):
         self._image_title = (t("regions.image_timing")
                              if events and events.mode in {"TIMING", "BURST"}
                              else t("regions.image_sky"))
-        self._redraw_regions()
+        source = background = None
+        if self._transform is not None:
+            source, background = self._pixel_regions(self._transform)
+        self._plot.show_image(self._image_data, self._image_title, source, background)
 
     def _centre_from_click(self, x: float, y: float) -> None:
         """Move a região da fonte para onde o usuário clicou."""
@@ -185,7 +188,9 @@ class RegionsPage(Page):
         source = background = None
         if self._transform is not None:
             source, background = self._pixel_regions(self._transform)
-        self._plot.show_image(self._image_data, self._image_title, source, background)
+        # set_regions em vez de show_image: mexer na geometria não pode custar o
+        # zoom que o usuário deu para posicionar com precisão.
+        self._plot.set_regions(source, background)
 
     def _pixel_regions(self, transform):
         """Geometria atual convertida para pixels da imagem."""

@@ -222,6 +222,58 @@ class ImageTransformTest(unittest.TestCase):
         self.assertAlmostEqual(transform.inverse_length(7.5), 600.0)
 
 
+class ImagePlotZoomTest(unittest.TestCase):
+    """Mexer na região não pode custar o enquadramento.
+
+    Redesenhar a figura inteira a cada ajuste descartava o zoom — justamente
+    quando o usuário aproximava para posicionar com precisão.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "minimal")
+        from PySide6.QtWidgets import QApplication
+        cls.application = QApplication.instance() or QApplication(["test"])
+
+    def plot(self):
+        import numpy as np
+        from xredux.gui.widgets.plots import ImagePlot
+        widget = ImagePlot()
+        widget.show_image(np.ones((64, 64)),
+                          source={"kind": "circle", "x": 32, "y": 32, "radius": 5},
+                          background={"kind": "annulus", "x": 32, "y": 32,
+                                      "inner": 10, "outer": 20})
+        return widget
+
+    def test_moving_the_region_keeps_the_view(self) -> None:
+        widget = self.plot()
+        widget.axes.set_xlim(20, 40)
+        widget.axes.set_ylim(20, 40)
+        widget.set_regions(source={"kind": "circle", "x": 30, "y": 30, "radius": 7},
+                           background={"kind": "annulus", "x": 30, "y": 30,
+                                       "inner": 12, "outer": 24})
+        self.assertEqual(widget.axes.get_xlim(), (20.0, 40.0))
+        self.assertEqual(widget.axes.get_ylim(), (20.0, 40.0))
+
+    def test_updating_does_not_pile_up_artists(self) -> None:
+        """Sem remover os antigos, cada ajuste deixaria um círculo para trás."""
+        widget = self.plot()
+        for radius in (6, 7, 8, 9):
+            widget.set_regions(source={"kind": "circle", "x": 32, "y": 32,
+                                       "radius": radius},
+                               background={"kind": "annulus", "x": 32, "y": 32,
+                                           "inner": 10, "outer": 20})
+        self.assertEqual(len(widget._patches), 3)
+
+    def test_regions_before_an_image_are_remembered_not_drawn(self) -> None:
+        from xredux.gui.widgets.plots import ImagePlot
+        widget = ImagePlot()
+        widget.set_regions(source={"kind": "circle", "x": 1, "y": 1, "radius": 1})
+        self.assertEqual(widget._patches, [])
+        self.assertEqual(widget._geometry["source"]["radius"], 1)
+
+
 class SessionRestoreTest(unittest.TestCase):
     """Reabrir uma sessão tem de trazer o estado de volta, não só as marcas.
 

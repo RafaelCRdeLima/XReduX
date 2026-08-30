@@ -149,6 +149,9 @@ class ImagePlot(PlotCanvas):
         super().__init__(parent, height)
         self._geometry: dict[str, dict] = {}
         self._grab: str | None = None
+        self._patches: list = []
+        self._legend = None
+        self._has_image = False
         for event, handler in (("button_press_event", self._on_press),
                                ("motion_notify_event", self._on_move),
                                ("button_release_event", self._on_release)):
@@ -224,44 +227,69 @@ class ImagePlot(PlotCanvas):
     def show_image(self, data: np.ndarray, title: str = "",
                    source: dict | None = None,
                    background: dict | None = None) -> None:
-        self._geometry = {"source": source or {}, "background": background or {}}
+        """Desenha a imagem inteira. Reconstrói os eixos, então reseta o zoom.
+
+        Para mexer só nas regiões use :meth:`set_regions`, que preserva o
+        enquadramento.
+        """
         axes = self.clear()
         finite = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
         scaled = np.log10(np.clip(finite, 0.0, None) + 1.0)
         axes.imshow(scaled, origin="lower", cmap="magma", aspect="equal")
-
-        drawn = self._draw_region(axes, source, self.SOURCE, t("regions.source"))
-        drawn |= self._draw_region(axes, background, self.BACKGROUND,
-                                   t("regions.background"))
-        if drawn:
-            axes.legend(loc="upper right", fontsize=8, framealpha=0.75)
         axes.set_title(title or t("regions.image_title"))
+        self._has_image = True
+        self.set_regions(source, background)
+
+    def set_regions(self, source: dict | None = None,
+                    background: dict | None = None) -> None:
+        """Atualiza só as regiões, mantendo zoom e deslocamento.
+
+        Redesenhar a figura inteira a cada ajuste de posição descartava o zoom
+        que o usuário tinha dado — justamente quando ele estava aproximando para
+        posicionar com precisão.
+        """
+        self._geometry = {"source": source or {}, "background": background or {}}
+        if not self._has_image:
+            return
+        axes = self.axes
+        for artist in self._patches:
+            artist.remove()
+        self._patches = []
+
+        drawn = self._add_region(axes, source, self.SOURCE, t("regions.source"))
+        drawn |= self._add_region(axes, background, self.BACKGROUND,
+                                  t("regions.background"))
+        if self._legend is not None:
+            self._legend.remove()
+            self._legend = None
+        if drawn:
+            self._legend = axes.legend(loc="upper right", fontsize=8, framealpha=0.75)
         self.draw()
 
-    def _draw_region(self, axes, region: dict | None, color: str, label: str) -> bool:
-        """Desenha uma região já convertida para pixels da imagem."""
+    def _add_region(self, axes, region: dict | None, color: str, label: str) -> bool:
+        """Acrescenta os traços de uma região já convertida para pixels."""
         if not region:
             return False
         from matplotlib.patches import Circle, Rectangle
 
-        kind = region.get("kind")
+        kind, added = region.get("kind"), []
         if kind == "circle":
-            axes.add_patch(Circle((region["x"], region["y"]), region["radius"],
-                                  fill=False, edgecolor=color, linewidth=1.6,
-                                  label=label))
-            return True
-        if kind == "annulus":
+            added.append(Circle((region["x"], region["y"]), region["radius"],
+                                fill=False, edgecolor=color, linewidth=1.6,
+                                label=label))
+        elif kind == "annulus":
             for index, radius in enumerate((region["inner"], region["outer"])):
-                axes.add_patch(Circle((region["x"], region["y"]), radius,
-                                      fill=False, edgecolor=color, linewidth=1.4,
-                                      linestyle="--",
-                                      label=label if index == 0 else None))
-            return True
-        if kind == "band":
+                added.append(Circle((region["x"], region["y"]), radius,
+                                    fill=False, edgecolor=color, linewidth=1.4,
+                                    linestyle="--",
+                                    label=label if index == 0 else None))
+        elif kind == "band":
             low, high = region["first"], region["last"]
-            axes.add_patch(Rectangle((low, axes.get_ylim()[0]), high - low,
-                                     axes.get_ylim()[1] - axes.get_ylim()[0],
-                                     fill=True, facecolor=color, alpha=0.18,
-                                     edgecolor=color, linewidth=1.4, label=label))
-            return True
-        return False
+            bottom, top = axes.get_ylim()
+            added.append(Rectangle((low, bottom), high - low, top - bottom,
+                                   fill=True, facecolor=color, alpha=0.18,
+                                   edgecolor=color, linewidth=1.4, label=label))
+        for patch in added:
+            axes.add_patch(patch)
+            self._patches.append(patch)
+        return bool(added)
