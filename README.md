@@ -211,6 +211,26 @@ RBS 1223, cujo perfil tem dois picos por rotação, o fundamental dá 5,13% e o 
 dá **11,43%** — Z²₁ = 85 contra Z²₃ = 830, ou seja, quase 90% da potência está
 nos harmônicos que o fundamental ignora.
 
+## Seção do artigo
+
+**Seção do artigo (LaTeX)**, na aba de Exportação, escreve a seção
+*Observations and data reduction* a partir da sessão: o parágrafo do software
+com as versões medidas, os critérios de seleção de eventos, as regiões em
+segundos de arco, o corte de surtos, o método de timing com os números
+encontrados, a tabela de log e um `.bib` com as referências que o texto cita.
+
+A regra que governa o gerador: **só afirma o que a sessão registra**. Uma etapa
+que não rodou não vira frase — nada de "os eventos foram corrigidos ao
+baricentro" quando o `barycen` não rodou. Um valor que não foi medido sai como
+`\textbf{??}`, que salta aos olhos no PDF em vez de passar por um número
+plausível. Uma frase de método inventada numa seção de artigo não é defeito de
+programa, é erro no registro científico.
+
+O `.tex` compila com `natbib` e nada mais — sem `\degr`, `\arcsec` ou
+`\tablefoot`, que são macros de classe de revista. Verificado com `pdflatex`
+em uma e em duas colunas: zero erros, zero citações indefinidas, zero
+transbordos.
+
 ## Busca de período sem candidato prévio
 
 O `efsearch` varre uma vizinhança de um período que se informa — serve para
