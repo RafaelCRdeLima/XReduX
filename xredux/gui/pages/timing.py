@@ -191,7 +191,8 @@ class TimingPage(Page):
                                 m=pipeline.state.h_harmonics or 0,
                                 probability=f"{probability:.2e}",
                                 fraction=f"{fraction * 100:.2f}",
-                                fraction_error=f"{error * 100:.2f}"))
+                                fraction_error=f"{error * 100:.2f}")
+                              + self._advice())
         # Com mais de um harmônico o fundamental não resume o perfil, e o
         # número que vale reportar passa a ser o RMS.
         if pipeline.state.pulsed_fraction_rms and (pipeline.state.h_harmonics or 1) > 1:
@@ -202,6 +203,33 @@ class TimingPage(Page):
                   rms_error=f"{rms_error * 100:.2f}",
                   harmonics=pipeline.state.h_harmonics))
         self._draw_profile()
+
+    def _advice(self) -> str:
+        """Diz quantos harmônicos e quantos bins os próprios dados pedem.
+
+        Os dois controles parecem gosto pessoal e não são. O teste H já escolhe
+        o número de harmônicos — é para isso que ele existe — e o número de bins
+        do perfil sai das contagens e da amplitude medida.
+        """
+        state = self.window.pipeline.state
+        lines = []
+
+        chosen = state.advised_harmonics or 0
+        if chosen and chosen != self._harmonics.value():
+            lines.append(t("timing.harmonics_hint", m=chosen))
+        elif chosen:
+            lines.append(t("timing.harmonics_ok", m=chosen))
+
+        # A fração RMS é a que descreve o desvio típico do perfil; a do
+        # fundamental ignora os harmônicos e subestimaria os bins possíveis.
+        amplitude = (state.pulsed_fraction_rms or state.pulsed_fraction or (0.0,))[0]
+        if state.event_count and amplitude > 0.0:
+            lines.append(t("timing.bins_hint",
+                           bins=timing_tasks.suggested_phase_bins(state.event_count,
+                                                                 amplitude),
+                           count=state.event_count,
+                           fraction=f"{amplitude * 100:.2f}"))
+        return ("\n" + "\n".join(lines)) if lines else ""
 
     def _fold(self) -> None:
         pipeline = self.window.pipeline

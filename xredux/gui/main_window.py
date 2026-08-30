@@ -28,6 +28,7 @@ from .pages.processing import ProcessingPage
 from .pages.regions import RegionsPage
 from .pages.spectra import SpectraPage
 from .pages.timing import TimingPage
+from ..archive import DESCRIPTOR
 from .widgets.console import LogConsole
 from .widgets.plots import PlotCanvas
 
@@ -240,7 +241,14 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         path = Path(directory)
-        self.settings.work_dir = path.parent
+        # A raiz do arquivo é a avó quando a observação está sob uma pasta de
+        # fonte. Apontar work_dir para a pasta da fonte — o que se fazia aqui —
+        # promovia a fonte a raiz, e as observações seguintes iam ser arquivadas
+        # dentro dela, uma fonte aninhada na outra.
+        root = (path.parent.parent if (path.parent / DESCRIPTOR).is_file()
+                else path.parent)
+        if root != self.settings.work_dir:
+            self.settings.work_dir = root
         self.ensure_pipeline(path.name)
 
     def _show_script(self) -> None:
