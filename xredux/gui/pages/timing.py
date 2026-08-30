@@ -273,7 +273,7 @@ class TimingPage(Page):
         bins = self._phase_bins.value()
 
         def work():
-            pipeline.state.profile_bundle = None
+            pipeline.state.pulse_profile = None
             return pipeline.fold(phase_bins=bins)
 
         self.run_task(work, self._folded, t("timing.folding"), advance=False)
@@ -287,7 +287,7 @@ class TimingPage(Page):
             return
         if pipeline.state.period_s is None:
             return
-        bundle = pipeline.state.profile_bundle
+        bundle = pipeline.state.pulse_profile
         if bundle is not None:
             phase, counts, error = bundle
         else:
