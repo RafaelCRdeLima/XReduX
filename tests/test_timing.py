@@ -7,6 +7,7 @@ não inventam sinal em ruído puro. Nenhum destes testes precisa do SAS.
 from __future__ import annotations
 
 import sys
+import math
 import unittest
 from pathlib import Path
 
@@ -229,6 +230,71 @@ class ProfileTest(unittest.TestCase):
         fraction, uncertainty = timing.pulsed_fraction(np.empty(0), PERIOD)
         self.assertTrue(np.isnan(fraction))
         self.assertTrue(np.isnan(uncertainty))
+
+
+class PhaseBinAdviceTest(unittest.TestCase):
+    """Quantos bins o perfil suporta sai das contagens e da amplitude."""
+
+    def test_more_photons_allow_more_bins(self) -> None:
+        few = timing.suggested_phase_bins(10_000, 0.05)
+        many = timing.suggested_phase_bins(100_000, 0.05)
+        self.assertLess(few, many)
+
+    def test_weaker_modulation_forces_fewer_bins(self) -> None:
+        """Quadrático: metade da amplitude, um quarto dos bins."""
+        # Longe do teto de 128, para medir a lei e não o corte.
+        strong = timing.suggested_phase_bins(1_000_000, 0.02)
+        weak = timing.suggested_phase_bins(1_000_000, 0.01)
+        self.assertEqual((strong, weak), (100, 25))
+
+    def test_each_bin_reaches_the_requested_significance(self) -> None:
+        count, fraction = 404_892, 0.0134
+        bins = timing.suggested_phase_bins(count, fraction)
+        self.assertGreaterEqual(fraction * math.sqrt(count / bins), 2.0)
+
+    def test_it_is_capped_and_floored(self) -> None:
+        self.assertEqual(timing.suggested_phase_bins(10_000_000, 0.9), 128)
+        self.assertEqual(timing.suggested_phase_bins(10, 0.001), 4)
+
+    def test_nonsense_input_falls_back(self) -> None:
+        self.assertEqual(timing.suggested_phase_bins(0, 0.1), 16)
+        self.assertEqual(timing.suggested_phase_bins(1000, 0.0), 16)
+
+
+class HarmonicAdviceTest(unittest.TestCase):
+    """O teste H escolhe o número de harmônicos; não é convenção."""
+
+    def _arrival_times(self, order: int, amplitude: float = 0.6,
+                       draws: int = 300_000, period: float = 5.0) -> np.ndarray:
+        """Tempos com um perfil que só tem potência no harmônico ``order``."""
+        generator = np.random.default_rng(20260830)
+        phase = generator.random(draws)
+        accepted = phase[generator.random(draws)
+                         < 0.5 * (1.0 + amplitude * np.cos(2 * np.pi * order * phase))]
+        return accepted * period
+
+    def test_it_reports_the_highest_harmonic_carrying_power(self) -> None:
+        for order in (1, 2, 3):
+            with self.subTest(order=order):
+                times = self._arrival_times(order=order)
+                self.assertEqual(timing.suggested_harmonics(times, 1.0 / 5.0), order)
+
+    def test_it_does_not_follow_the_h_test_argmax(self) -> None:
+        """A razão de existir desta função.
+
+        Num seno puro de 300 mil fótons, Z² vale ~27 mil e os harmônicos 2 a 5
+        somam uma unidade cada — ruído. Ainda assim o argmax de Z²ₘ−4m+4 escolhe
+        m = 5, porque a diferença entre as opções é de poucas unidades. Seguir
+        esse número como conselho mandaria dobrar em cima de nada.
+        """
+        times = self._arrival_times(order=1)
+        _, argmax = timing.h_test(times, 1.0 / 5.0)
+        self.assertGreater(argmax, 1)
+        self.assertEqual(timing.suggested_harmonics(times, 1.0 / 5.0), 1)
+
+    def test_it_never_returns_zero(self) -> None:
+        noise = np.random.default_rng(3).random(5_000) * 100.0
+        self.assertGreaterEqual(timing.suggested_harmonics(noise, 1.0 / 7.0), 1)
 
 
 if __name__ == "__main__":

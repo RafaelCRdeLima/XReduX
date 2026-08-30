@@ -78,6 +78,10 @@ class ReductionState:
     h_harmonics: int | None = None
     pulsed_fraction: tuple[float, float] | None = None
     pulsed_fraction_rms: tuple[float, float] | None = None
+    #: Fótons usados no refino, para dimensionar os bins do perfil.
+    event_count: int | None = None
+    #: Até que harmônico o perfil tem potência acima do ruído.
+    advised_harmonics: int | None = None
     fold_file: Path | None = None
 
     source_spectrum: spectra.Spectrum | None = None
@@ -492,7 +496,7 @@ class Pipeline:
     #: Resultados do timing que a sessão guarda para a próxima abertura.
     TIMING_RESULTS = ("period_s", "search_probability", "search_confirmed",
                       "h_statistic", "h_harmonics", "pulsed_fraction",
-                      "pulsed_fraction_rms")
+                      "pulsed_fraction_rms", "event_count", "advised_harmonics")
 
     def _remember_timing(self) -> None:
         """Guarda os resultados do timing num passo só deles.
@@ -557,6 +561,9 @@ class Pipeline:
 
         self.state.refined = refined
         self.state.period_s = refined.best_period_s
+        self.state.event_count = int(times.size)
+        self.state.advised_harmonics = timing.suggested_harmonics(
+            times, refined.as_frequency())
         self.state.h_statistic = statistic
         self.state.h_harmonics = harmonic
         self.state.pulsed_fraction = fraction

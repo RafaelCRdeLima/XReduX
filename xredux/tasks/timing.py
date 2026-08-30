@@ -375,6 +375,62 @@ def h_test(times: np.ndarray, frequency: float, max_harmonics: int = 20) -> tupl
     return best_h, best_m
 
 
+#: Limiar de χ² com 2 graus de liberdade para p = 0,001 — o corte abaixo do
+#: qual a contribuição de um harmônico é indistinguível de ruído.
+HARMONIC_THRESHOLD = 13.8
+
+
+def suggested_harmonics(times: np.ndarray, frequency: float,
+                        max_harmonics: int = 20,
+                        threshold: float = HARMONIC_THRESHOLD) -> int:
+    """Até que harmônico o perfil tem potência de verdade.
+
+    **Não é o ``m`` do teste H.** Aquele é o argmax de ``Z²ₘ - 4m + 4`` e serve
+    para calcular a significância, mas é instável como conselho: num sinal
+    forte, ``Z²`` já vale dezenas de milhares e a escolha entre ``m = 1`` e
+    ``m = 5`` se decide por flutuações de poucas unidades no ruído da cauda. Um
+    seno puro de 300 mil fótons chega a pedir ``m = 5``, com os harmônicos 2 a 5
+    contribuindo uma unidade cada.
+
+    A pergunta aqui é outra: *quais* harmônicos carregam sinal. A contribuição
+    do harmônico ``k`` é ``Z²ₖ - Z²ₖ₋₁``, que sob a hipótese nula segue χ² com
+    dois graus de liberdade. Devolve-se o maior ``k`` cuja contribuição passa do
+    limiar — nunca menos que 1, porque dobrar em cima de nada não é opção.
+    """
+    if times.size == 0:
+        return 1
+    grid = np.array([frequency], dtype=float)
+    cumulative = [0.0] + [float(z_squared_n(times, grid, harmonics=order)[0])
+                          for order in range(1, max_harmonics + 1)]
+    contributions = np.diff(cumulative)
+    significant = np.flatnonzero(contributions >= threshold)
+    return int(significant[-1]) + 1 if significant.size else 1
+
+
+def suggested_phase_bins(count: int, fraction: float, significance: float = 2.0,
+                         maximum: int = 128) -> int:
+    """Maior número de bins de fase em que cada ponto do perfil ainda se vê.
+
+    Os bins não entram em Z²ₙ nem no teste H, que trabalham sobre os tempos de
+    chegada sem grade nenhuma — servem só para desenhar o perfil. A escolha é um
+    balanço: mais bins resolvem estrutura fina, menos bins dão barra de erro
+    menor.
+
+    Com ``N`` contagens repartidas em ``B`` bins, cada bin tem ``N/B`` contagens
+    e flutuação de Poisson ``sqrt(N/B)``; uma modulação de amplitude fracionária
+    ``f`` desloca o bin em ``f·N/B``. A razão entre as duas é ``f·sqrt(N/B)``, e
+    exigir que ela valha ``significance`` dá ``B ≤ N·f²/significance²``.
+
+    O padrão são 2σ por bin, não 3: um perfil é lido como forma, não como uma
+    coleção de detecções independentes. Exigir 3σ em cada ponto suaviza a curva
+    além do necessário e esconde estrutura que o teste H já provou existir.
+    """
+    if count <= 0 or fraction <= 0.0 or significance <= 0.0:
+        return 16
+    bins = int(count * fraction * fraction / (significance * significance))
+    return int(min(max(bins, 4), maximum))
+
+
 def h_test_probability(h_value: float) -> float:
     """Probabilidade de excedência do teste H sob a hipótese nula.
 
