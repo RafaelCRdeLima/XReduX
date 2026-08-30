@@ -133,6 +133,53 @@ def check_tasks(report: Report, environment) -> None:
             report.ok(f"{group}: todas as {len(tasks)} tarefas encontradas")
 
 
+#: Módulos que os scripts auxiliares do SAS importam. O epatplot_graph.py,
+#: que desenha o diagnóstico de pile-up, precisa dos três.
+SAS_HELPER_MODULES = ("astropy", "numpy", "matplotlib", "beautifultable")
+
+
+def check_sas_python(report: Report, environment) -> None:
+    """Confere o Python que os auxiliares do SAS vão usar.
+
+    Metade das tarefas do SAS 22.1 termina chamando um script com shebang
+    ``#!/usr/bin/env python``. Se esse ``python`` for o do sistema, a tarefa faz
+    todo o trabalho pesado e morre no fim com ModuleNotFoundError — um erro que
+    não se parece nem um pouco com um problema de ambiente.
+    """
+    report.heading("Python das tarefas do SAS")
+    try:
+        located = subprocess.run(["which", "python"], env=environment.variables,
+                                 capture_output=True, text=True, timeout=60)
+        interpreter = located.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        report.fail(f"não foi possível localizar o python: {error}")
+        return
+    if not interpreter:
+        report.fail("nenhum 'python' no PATH das tarefas",
+                    "os auxiliares do SAS têm shebang #!/usr/bin/env python")
+        return
+
+    expected = str(Path(sys.executable).resolve())
+    actual = str(Path(interpreter).resolve())
+    if actual == expected:
+        report.ok(f"python das tarefas = o do XREDUX ({interpreter})")
+    else:
+        report.warn(f"as tarefas usam {interpreter}, o XREDUX usa {sys.executable}")
+
+    missing = []
+    for module in SAS_HELPER_MODULES:
+        probe = subprocess.run(["python", "-c", f"import {module}"],
+                               env=environment.variables, capture_output=True,
+                               timeout=120)
+        if probe.returncode != 0:
+            missing.append(module)
+    if missing:
+        report.fail(f"faltam para os auxiliares do SAS: {', '.join(missing)}",
+                    "rode: python tools/install_sas.py")
+    else:
+        report.ok(f"os {len(SAS_HELPER_MODULES)} módulos dos auxiliares importam")
+
+
 def check_smoke(report: Report, environment) -> None:
     """Roda uma tarefa real do SAS, que é o teste que de fato prova a instalação."""
     report.heading("Teste de fumaça")
@@ -227,6 +274,7 @@ def report() -> int:
         environment = check_environment(checks, settings)
         if environment is not None:
             check_tasks(checks, environment)
+            check_sas_python(checks, environment)
             check_smoke(checks, environment)
 
     print()

@@ -176,7 +176,9 @@ def check_pileup(context: TaskContext, events: EventList, region_expression: str
     mais comum na redução de fontes brilhantes — daí ele ser uma etapa própria e
     não uma nota de rodapé.
     """
-    output = output or context.work_dir / f"{events.instrument.lower()}_pileup.ps"
+    # PDF porque o auxiliar do SAS 22.1 só produz isso: pedir PostScript faz
+    # ele avisar "Only format supported now is pdf" e trocar a extensão sozinho.
+    output = output or context.work_dir / f"{events.instrument.lower()}_pileup.pdf"
     selected = context.work_dir / f"{events.instrument.lower()}_pileup_evts.ds"
     expression = selection_expression([
         events.quality_flag, "FLAG==0",
@@ -189,8 +191,13 @@ def check_pileup(context: TaskContext, events: EventList, region_expression: str
         "keepfilteroutput": True, "destruct": True,
         "expression": expression,
     }, cwd=context.work_dir, timeout=3600)
+    # O plotfile vai como nome relativo, e não como caminho absoluto: o
+    # epatplot perde a barra inicial ao repassá-lo ao script que desenha, que
+    # então tenta escrever em "home/rafael/..." e morre com FileNotFoundError.
+    # Um nome relativo não tem barra a perder, e a tarefa roda no work_dir.
     context.sas(STEP_PILEUP, "epatplot", {
-        "set": selected, "plotfile": output, "useplotfile": True, "device": "/cps",
+        "set": selected, "plotfile": output.name, "useplotfile": True,
+        "device": "/pdf",
     }, cwd=context.work_dir, timeout=1800)
     context.require(output)
     return output

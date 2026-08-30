@@ -351,6 +351,25 @@ próprio por sessão. Isso desacopla as versões de Python e HEASoft do SAS das 
 interface, e impede que execuções simultâneas disputem os arquivos de parâmetros
 do HEASoft — uma disputa que produz resultados silenciosamente errados.
 
+## O Python das tarefas do SAS
+
+Metade das tarefas do SAS 22.1 termina chamando um script auxiliar com shebang
+`#!/usr/bin/env python`. Se esse `python` for o do sistema, a tarefa faz todo o
+trabalho pesado e morre no fim com `ModuleNotFoundError` — um erro que não se
+parece nem um pouco com um problema de ambiente. Por isso `xredux/env.py` põe o
+interpretador do XREDUX no `PATH` das tarefas, atrás só dos binários do SAS e do
+HEASoft, e define `PYTHONNOUSERSITE=1` para que um pacote em `~/.local` não passe
+na frente do ambiente.
+
+`sas_python_packages.txt` pede `PyQt5`, que **não** é instalado: a interface roda
+em PySide6 no mesmo ambiente, e dois bindings Qt no mesmo processo disputam
+plugins de plataforma. `pyds9`, `notebook` e `pytest` servem a ferramentas
+interativas que o pipeline não usa.
+
+O `epatplot` recebe o `plotfile` como nome **relativo** e com extensão `.pdf`:
+ele perde a barra inicial ao repassar o caminho ao script que desenha, e o
+auxiliar do SAS 22.1 só produz PDF.
+
 ## Referências
 
 - SAS: <https://www.cosmos.esa.int/web/xmm-newton/sas>
