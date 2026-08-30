@@ -491,5 +491,53 @@ class BackgroundThresholdTest(unittest.TestCase):
         self.assertAlmostEqual(mixed.good_fraction(0.4), 0.8)
 
 
+class TimingPersistenceTest(unittest.TestCase):
+    """Os resultados do timing têm de sobreviver ao fechamento da sessão."""
+
+    def _pipeline(self, work: Path):
+        from xredux.config import Settings
+        from xredux.pipeline import Pipeline
+        from xredux.tasks.base import TaskContext
+
+        session = Session.load_or_create(work, "0412601301", "RX J1856.5-3754")
+        context = TaskContext(runner=ProcessRunner(), env={}, session=session,
+                              work_dir=work)
+        return Pipeline(Settings(), session, context)
+
+    def test_results_survive_a_new_barycentric_correction(self) -> None:
+        """O barycen reescreve o passo que antes guardava o período."""
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            pipeline = self._pipeline(work)
+            pipeline.state.period_s = 7.055
+            pipeline.state.h_statistic = 41.2
+            pipeline.state.h_harmonics = 2
+            pipeline.state.pulsed_fraction = (0.012, 0.003)
+            pipeline.state.search_confirmed = True
+            pipeline._remember_timing()
+
+            # Refazer a correção baricêntrica reinicia o passo "timing".
+            pipeline.session.begin("timing", {"ra": 284.1, "dec": -37.9})
+
+            reopened = self._pipeline(work)
+            reopened.restore()
+            self.assertAlmostEqual(reopened.state.period_s, 7.055)
+            self.assertAlmostEqual(reopened.state.h_statistic, 41.2)
+            self.assertEqual(reopened.state.h_harmonics, 2)
+            self.assertEqual(reopened.state.pulsed_fraction, (0.012, 0.003))
+            self.assertIs(reopened.state.search_confirmed, True)
+
+    def test_sessions_written_before_the_change_are_still_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            pipeline = self._pipeline(work)
+            pipeline.session.step("timing").parameters["period_s"] = 10.31
+            pipeline.session.save()
+
+            reopened = self._pipeline(work)
+            reopened.restore()
+            self.assertAlmostEqual(reopened.state.period_s, 10.31)
+
+
 if __name__ == "__main__":
     unittest.main()

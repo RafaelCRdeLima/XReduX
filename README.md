@@ -184,7 +184,7 @@ movimento orbital da Terra espalha o sinal e o pico desaparece. As duas rotas de
 busca — `efsearch` sobre a curva binada e Z²ₙ sobre os tempos não binados —
 concordam em 10⁻⁶ s, cada uma partindo de um caminho de código diferente.
 
-A figura fica em `products/0412601301/0412601301_timing.png`:
+A figura fica em `products/RX J1856.5-3754/0412601301/0412601301_timing.png`:
 
 ```bash
 python tools/reduce.py --obsid 0412601301 --target "RX J1856.5-3754" \
@@ -211,9 +211,41 @@ RBS 1223, cujo perfil tem dois picos por rotação, o fundamental dá 5,13% e o 
 dá **11,43%** — Z²₁ = 85 contra Z²₃ = 830, ou seja, quase 90% da potência está
 nos harmônicos que o fundamental ignora.
 
+## Arquivamento
+
+As observações ficam agrupadas pela fonte, não soltas pelo ObsID:
+
+```
+products/
+  RX J1308.6+2127/
+    source.json          nome, coordenadas e apelidos da fonte
+    0163560101/
+    0844140101/
+  RX J1856.5-3754/
+    source.json
+    0412601301/
+```
+
+O agrupamento é **por posição**, não por nome. A mesma fonte chega como
+`RBS1223` no sumário do ODF e como `RX J1308.6+2127` na busca por nome; casar
+por texto criaria duas pastas para uma fonte só. Duas observações a menos de 3′
+uma da outra vão para a mesma pasta, e os nomes alternativos ficam registrados
+como apelidos no `source.json`.
+
+Na interface, **Usar ODF local** lista o que já está no disco — fontes,
+observações e quais têm ODF extraído — em vez de abrir um navegador de arquivos.
+
+Observações do arranjo antigo, soltas em `products/<ObsID>/`, continuam sendo
+encontradas. Para reorganizá-las:
+
+```bash
+python tools/organise_archive.py            # mostra o plano
+python tools/organise_archive.py --apply    # move
+```
+
 ## Reprodutibilidade
 
-Cada observação tem seu diretório em `products/<ObsID>/` com:
+Cada observação tem seu diretório em `products/<fonte>/<ObsID>/` com:
 
 - `session.json` — estado de cada etapa, parâmetros, produtos, códigos de saída;
 - `reproduce.sh` — todos os comandos executados, em ordem, pronto para rodar.
@@ -277,8 +309,9 @@ xredux/
   guide/    guide.pt_BR.html guide.en.html · img/
 tools/      install_sas.py doctor.py check_parameters.py
             reduce.py plot_timing.py build_guide.py
+            organise_archive.py
 tests/
-products/<ObsID>/
+products/<fonte>/<ObsID>/
 ```
 
 A interface roda no ambiente com PySide6 e astropy; cada tarefa do SAS é um

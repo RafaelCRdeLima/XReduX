@@ -111,7 +111,7 @@
         <figure><img src="img/aquisicao.webp" alt="1. Aquisição" loading="lazy"></figure>
         <dl class="decisions">
           <div class="decision"><dt>Qual observação</dt><dd>A coluna <b>Duração</b> ordena o que vale a pena. Comece pela mais longa.</dd></div>
-          <div class="decision"><dt>Já tenho o ODF</dt><dd><b>Usar ODF local…</b> pula o download e aponta para um diretório no disco.</dd></div>
+          <div class="decision"><dt>Já tenho o ODF</dt><dd><b>Usar ODF local…</b> abre a lista do que já está no disco, agrupado por fonte, indicando quais observações têm ODF extraído. <b>Procurar…</b> aponta para um diretório fora do arquivo.</dd></div>
           <div class="decision"><dt>Atenção</dt><dd>O pacote tem 1 a 2 GB e o servidor do XSA não permite retomada. Se a transferência cair, o programa recomeça do zero e só aceita o arquivo depois de conseguir lê-lo inteiro.</dd></div>
         </dl>
       </section>
@@ -203,7 +203,7 @@
 
   <section class="closing">
     <h2>Três coisas que valem saber</h2>
-    <div class="note"><span class="tag">Retomável</span><p>Cada observação tem seu diretório em <code>products/&lt;ObsID&gt;/</code> com um <code>session.json</code>. Feche a janela no meio e reabra com <b>Abrir sessão…</b>: as etapas concluídas aparecem marcadas e o <code>epproc</code> não se refaz à toa.</p></div>
+    <div class="note"><span class="tag">Retomável</span><p>Cada observação tem seu diretório em <code>products/&lt;fonte&gt;/&lt;ObsID&gt;/</code> com um <code>session.json</code>. As observações são agrupadas pela posição do alvo, de modo que <code>RBS1223</code> e <code>RX J1308.6+2127</code> caem na mesma pasta. Feche a janela no meio e reabra com <b>Abrir sessão…</b>: as etapas concluídas aparecem marcadas e o <code>epproc</code> não se refaz à toa.</p></div>
     <div class="note"><span class="tag">Reprodutível</span><p><b>Script reprodutível</b> grava um <code>reproduce.sh</code> com todos os comandos executados, em ordem. É o que torna a redução defensável num artigo.</p></div>
     <div class="note"><span class="tag">O log importa</span><p>O painel inferior mostra a saída das tarefas ao vivo. Avisos de pile-up, calibração ausente ou exposição zerada aparecem ali antes de virarem um número errado.</p></div>
 

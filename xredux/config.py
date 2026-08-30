@@ -111,8 +111,19 @@ class Settings:
 
     # -- diretórios de trabalho ------------------------------------------
 
-    def observation_dir(self, obsid: str) -> Path:
-        """Diretório de trabalho de uma observação, criado sob demanda."""
-        directory = self.work_dir / obsid
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+    def observation_dir(self, obsid: str, target: str | None = None,
+                        ra: float | None = None, dec: float | None = None) -> Path:
+        """Diretório de trabalho da observação, agrupado pela fonte.
+
+        Sem nome nem posição a observação ainda é localizada, se já estiver
+        arquivada; só uma observação inédita e anônima cai numa pasta genérica.
+        """
+        from .archive import Archive
+
+        return Archive(self.work_dir).observation_dir(obsid, target, ra, dec)
+
+    def archive(self):
+        """Arquivo de observações sob o diretório de trabalho."""
+        from .archive import Archive
+
+        return Archive(self.work_dir)

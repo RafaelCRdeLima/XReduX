@@ -45,8 +45,9 @@ CONTENT = {
              "A busca aceita o nome do alvo — resolvido pelo Sesame — ou um ObsID direto.",
              [("Qual observação", "A coluna <b>Duração</b> ordena o que vale a pena. "
                "Comece pela mais longa."),
-              ("Já tenho o ODF", "<b>Usar ODF local…</b> pula o download e aponta para "
-               "um diretório no disco."),
+              ("Já tenho o ODF", "<b>Usar ODF local…</b> abre a lista do que já está "
+               "no disco, agrupado por fonte, indicando quais observações têm ODF "
+               "extraído. <b>Procurar…</b> aponta para um diretório fora do arquivo."),
               ("Atenção", "O pacote tem 1 a 2 GB e o servidor do XSA não permite "
                "retomada. Se a transferência cair, o programa recomeça do zero e só "
                "aceita o arquivo depois de conseguir lê-lo inteiro.")]),
@@ -129,7 +130,10 @@ CONTENT = {
         "closing_title": "Três coisas que valem saber",
         "notes": [
             ("Retomável", "Cada observação tem seu diretório em "
-             "<code>products/&lt;ObsID&gt;/</code> com um <code>session.json</code>. "
+             "<code>products/&lt;fonte&gt;/&lt;ObsID&gt;/</code> com um "
+             "<code>session.json</code>. As observações são agrupadas pela posição do "
+             "alvo, de modo que <code>RBS1223</code> e <code>RX J1308.6+2127</code> "
+             "caem na mesma pasta. "
              "Feche a janela no meio e reabra com <b>Abrir sessão…</b>: as etapas "
              "concluídas aparecem marcadas e o <code>epproc</code> não se refaz à toa."),
             ("Reprodutível", "<b>Script reprodutível</b> grava um "
@@ -156,8 +160,9 @@ CONTENT = {
              "The search takes a target name — resolved through Sesame — or an ObsID.",
              [("Which observation", "The <b>Duration</b> column ranks what is worth the "
                "time. Start with the longest."),
-              ("Already have the ODF", "<b>Use local ODF…</b> skips the download and "
-               "points at a directory on disk."),
+              ("Already have the ODF", "<b>Use local ODF…</b> lists what is already on "
+               "disk, grouped by source, showing which observations have an extracted "
+               "ODF. <b>Browse…</b> points at a directory outside the archive."),
               ("Watch out", "The package is 1–2 GB and the XSA server does not support "
                "resuming. If the transfer drops, the program starts over and only "
                "accepts the file once it can read it end to end.")]),
@@ -241,7 +246,10 @@ CONTENT = {
         "closing_title": "Three things worth knowing",
         "notes": [
             ("Resumable", "Each observation has its directory under "
-             "<code>products/&lt;ObsID&gt;/</code> with a <code>session.json</code>. "
+             "<code>products/&lt;source&gt;/&lt;ObsID&gt;/</code> with a "
+             "<code>session.json</code>. Observations are grouped by target position, "
+             "so <code>RBS1223</code> and <code>RX J1308.6+2127</code> land in the same "
+             "folder. "
              "Close the window midway and reopen with <b>Open session…</b>: finished "
              "steps come back marked and <code>epproc</code> is not redone for nothing."),
             ("Reproducible", "<b>Reproducible script</b> writes a "

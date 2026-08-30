@@ -214,10 +214,20 @@ class Pipeline:
                            description=str(description) or str(expression)))
 
     def _restore_timing(self) -> None:
-        record = self.session.steps.get("timing")
-        period = record.parameters.get("period_s") if record else None
-        if period:
-            self.state.period_s = float(period)
+        record = self.session.steps.get("period_search")
+        parameters = record.parameters if record else {}
+        # O período antigo ficava no passo "timing"; sessões gravadas antes da
+        # mudança continuam legíveis.
+        legacy = self.session.steps.get("timing")
+        if "period_s" not in parameters and legacy is not None:
+            parameters = {**legacy.parameters}
+        for field in self.TIMING_RESULTS:
+            value = parameters.get(field)
+            if value is None:
+                continue
+            # As frações são pares (valor, incerteza); o JSON as devolve como
+            # lista, e quem as consome espera uma tupla.
+            setattr(self.state, field, tuple(value) if isinstance(value, list) else value)
         if self.state.source_region is None:
             return
         for path in sorted(self.work_dir.glob("src_lc_*.fits")):
@@ -457,7 +467,27 @@ class Pipeline:
         self.state.period_search = result
         self.state.period_s = result.best_period_s
         self._confirm(result.best_period_s)
+        self._remember_timing()
         return result
+
+    #: Resultados do timing que a sessão guarda para a próxima abertura.
+    TIMING_RESULTS = ("period_s", "search_probability", "search_confirmed",
+                      "h_statistic", "h_harmonics", "pulsed_fraction",
+                      "pulsed_fraction_rms")
+
+    def _remember_timing(self) -> None:
+        """Guarda os resultados do timing num passo só deles.
+
+        Ficavam nos parâmetros do passo ``timing``, que a correção baricêntrica
+        reescreve inteiro ao começar — bastava refazer o barycen para o período
+        já encontrado sumir da sessão sem aviso.
+        """
+        record = self.session.step("period_search")
+        for field in self.TIMING_RESULTS:
+            value = getattr(self.state, field, None)
+            if value is not None:
+                record.parameters[field] = value
+        self.session.save()
 
     def _confirm(self, period_s: float) -> None:
         """Confere o pico do efsearch contra os tempos de chegada não binados.
@@ -508,13 +538,11 @@ class Pipeline:
 
         self.state.refined = refined
         self.state.period_s = refined.best_period_s
-        # Fica na sessão para a próxima abertura encontrá-lo.
-        self.session.step("timing").parameters["period_s"] = refined.best_period_s
-        self.session.save()
         self.state.h_statistic = statistic
         self.state.h_harmonics = harmonic
         self.state.pulsed_fraction = fraction
         self.state.pulsed_fraction_rms = rms
+        self._remember_timing()
         return refined
 
     def fold(self, phase_bins: int = 32) -> Path:
