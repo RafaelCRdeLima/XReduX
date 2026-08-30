@@ -298,6 +298,14 @@ def main() -> int:
         search = pipeline.search_period(arguments.period, trials=arguments.trials,
                                         phase_bins=arguments.phase_bins)
         report(f"efsearch: P = {search.best_period_s:.6f} s (χ² = {search.statistic:.1f})")
+        if pipeline.state.search_confirmed is False:
+            warn(f"o pico NÃO se confirma nos tempos não binados "
+                 f"(teste H: p = {pipeline.state.search_probability:.2g}). "
+                 f"Suspeite de alias: {search.best_period_s / arguments.binsize:.1f} "
+                 f"bins da curva cabem no período.")
+        elif pipeline.state.search_confirmed:
+            report(f"confirmado nos tempos não binados "
+                   f"(p = {pipeline.state.search_probability:.1e})")
 
         refined = pipeline.refine_period(band_ev=band, harmonics=arguments.harmonics)
         state = pipeline.state

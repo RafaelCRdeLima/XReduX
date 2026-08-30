@@ -191,5 +191,8 @@
   "regions.source": "Source",
   "regions.background": "Background",
   "filtering.quiescent_label": "quiescent {value} ct/s",
-  "filtering.bin_too_small": "The bin is too short: noise alone crosses the cut. Use at least {binsize} s."
+  "filtering.bin_too_small": "The bin is too short: noise alone crosses the cut. Use at least {binsize} s.",
+  "timing.search_unconfirmed": "The peak is NOT confirmed on unbinned arrival times (H test: p = {probability}). Likely an alias of the curve's grid: check whether the period is a multiple of the bin.",
+  "timing.search_unconfirmed_short": "Peak not confirmed — likely a binning alias",
+  "timing.search_confirmed": "Confirmed on unbinned arrival times (p = {probability})."
 }
