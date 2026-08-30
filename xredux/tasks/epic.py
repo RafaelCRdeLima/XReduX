@@ -7,6 +7,8 @@ por isso o resultado fica registrado na sessão para não ser refeito.
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,8 +170,94 @@ def _as_float(value) -> float | None:
         return None
 
 
-def check_pileup(context: TaskContext, events: EventList, region_expression: str,
-                 output: Path | None = None) -> Path:
+#: Linha que o epatplot imprime com as razões observado/modelo.
+_FRACTIONS = re.compile(
+    r"s:\s*(?P<s>[0-9.]+)\s*\+/-\s*(?P<se>[0-9.]+)\s+"
+    r"d:\s*(?P<d>[0-9.]+)\s*\+/-\s*(?P<de>[0-9.]+)")
+
+#: Acima disto o empilhamento deixa de ser desprezível e passa a distorcer
+#: espectro e curva de luz. Vem da estatística de Poisson no núcleo da PSF:
+#: com ``n`` fótons por quadro na região, a chance de dois caírem no mesmo
+#: quadro e em pixels vizinhos é da ordem de ``n²``, e é preciso ``n`` bem
+#: abaixo de 1 para que isso fique nos décimos de por cento.
+PHOTONS_PER_FRAME_LIMIT = 0.1
+
+
+@dataclass
+class PileupCheck:
+    """O que o ``epatplot`` mediu, e o que isso quer dizer.
+
+    O diagrama sozinho não responde a pergunta que importa. As razões
+    observado/modelo de padrões simples e duplos têm a assinatura do
+    empilhamento — falta de simples e sobra de duplos —, mas outras coisas
+    produzem a mesma assinatura, e é a taxa de contagem que separa uma da outra.
+    """
+
+    plot: Path
+    rate_ct_s: float
+    frame_time_s: float
+    singles: tuple[float, float] | None = None
+    doubles: tuple[float, float] | None = None
+    #: As duas metades da região, medidas à parte quando houve o que explicar.
+    #: São elas que decidem, e não um limiar de taxa escolhido a dedo.
+    core: "PileupCheck | None" = None
+    wings: "PileupCheck | None" = None
+
+    def photons_per_frame(self) -> float:
+        """Fótons na região a cada leitura do detector."""
+        return self.rate_ct_s * self.frame_time_s
+
+    def doubles_excess_sigma(self) -> float | None:
+        """Quantos desvios a sobra de duplos está de zero."""
+        if self.doubles is None or self.doubles[1] <= 0.0:
+            return None
+        return (self.doubles[0] - 1.0) / self.doubles[1]
+
+    def suspicious(self) -> bool:
+        """Se há sobra de duplos que peça explicação."""
+        excess = self.doubles_excess_sigma()
+        return excess is not None and excess >= 3.0
+
+    def gradient_sigma(self) -> float | None:
+        """Quanto a sobra de duplos cresce do núcleo para as asas, em desvios.
+
+        Esta é a medida que decide, e ela precisa comparar **amostras
+        independentes**. Comparar a região inteira com ela mesma sem o núcleo
+        não serve: uma contém a outra, e a significância cai só porque sobram
+        menos contagens — foi assim que a primeira versão deste teste concluiu
+        "empilhamento" a partir de um valor central que mal se moveu.
+
+        O empilhamento cresce com o brilho superficial, então vive no núcleo. Se
+        a razão de duplos do núcleo é igual à das asas, seja qual for o valor,
+        o que a produz não é empilhamento.
+        """
+        if self.core is None or self.wings is None:
+            return None
+        if self.core.doubles is None or self.wings.doubles is None:
+            return None
+        difference = self.core.doubles[0] - self.wings.doubles[0]
+        spread = math.hypot(self.core.doubles[1], self.wings.doubles[1])
+        return difference / spread if spread > 0.0 else None
+
+    def verdict(self) -> str:
+        """``clean``, ``pileup``, ``unexplained`` ou ``inconclusive``.
+
+        Um limiar de taxa não resolveria: mede-se a taxa da região inteira, mas
+        o empilhamento vive no núcleo da PSF, e quanto da luz cai ali depende da
+        PSF, do binning e do raio — arbitrar um corte seria trocar uma medida
+        por um palpite. Então mede-se núcleo e asas, e compara-se.
+        """
+        if not self.suspicious():
+            return "clean"
+        gradient = self.gradient_sigma()
+        if gradient is None:
+            return "inconclusive"
+        return "pileup" if gradient >= 3.0 else "unexplained"
+
+
+def check_pileup(context: TaskContext, events: EventList, source,
+                 output: Path | None = None, with_core_test: bool = True
+                 ) -> PileupCheck:
     """Roda ``epatplot`` para diagnosticar empilhamento de fótons.
 
     O empilhamento distorce simultaneamente espectro e curva de luz, e é o erro
@@ -181,8 +269,8 @@ def check_pileup(context: TaskContext, events: EventList, region_expression: str
     output = output or context.work_dir / f"{events.instrument.lower()}_pileup.pdf"
     selected = context.work_dir / f"{events.instrument.lower()}_pileup_evts.ds"
     expression = selection_expression([
-        events.quality_flag, "FLAG==0",
-        f"PATTERN<={events.max_pattern}", region_expression,
+        events.quality_flag, "FLAG==0", f"PATTERN<={events.max_pattern}",
+        getattr(source, "expression", source),
     ])
     context.sas(STEP_PILEUP, "evselect", {
         "table": f"{events.path}:EVENTS",
@@ -195,9 +283,45 @@ def check_pileup(context: TaskContext, events: EventList, region_expression: str
     # epatplot perde a barra inicial ao repassá-lo ao script que desenha, que
     # então tenta escrever em "home/rafael/..." e morre com FileNotFoundError.
     # Um nome relativo não tem barra a perder, e a tarefa roda no work_dir.
-    context.sas(STEP_PILEUP, "epatplot", {
+    result = context.sas(STEP_PILEUP, "epatplot", {
         "set": selected, "plotfile": output.name, "useplotfile": True,
         "device": "/pdf",
     }, cwd=context.work_dir, timeout=1800)
     context.require(output)
-    return output
+
+    fractions = _FRACTIONS.search(getattr(result, "output", "") or "")
+    counts, live = _counted(selected)
+    check = PileupCheck(
+        plot=output,
+        rate_ct_s=counts / live if live else 0.0,
+        frame_time_s=events.time_resolution_us() / 1.0e6,
+        singles=((float(fractions.group("s")), float(fractions.group("se")))
+                 if fractions else None),
+        doubles=((float(fractions.group("d")), float(fractions.group("de")))
+                 if fractions else None),
+    )
+
+    # Só se houver o que explicar, e só uma vez: a chamada recursiva pede
+    # explicitamente para não repetir o teste.
+    if with_core_test and check.suspicious():
+        for attribute, builder in (("core", "core"), ("wings", "excluding_core")):
+            part = getattr(source, builder, lambda: None)()
+            if part is None:
+                continue
+            setattr(check, attribute, check_pileup(
+                context, events, part, with_core_test=False,
+                output=output.with_name(f"{output.stem}_{attribute}.pdf")))
+    return check
+
+
+def _counted(table: Path) -> tuple[int, float]:
+    """Eventos e tempo vivo da lista, para a taxa que decide o empilhamento."""
+    from astropy.io import fits
+
+    try:
+        with fits.open(table, memmap=True) as hdus:
+            header = hdus["EVENTS"].header
+            live = header.get("LIVETIME") or header.get("ONTIME") or 0.0
+            return int(header.get("NAXIS2") or 0), float(live)
+    except (OSError, KeyError, ValueError, TypeError):
+        return 0, 0.0

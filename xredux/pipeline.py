@@ -82,6 +82,8 @@ class ReductionState:
     event_count: int | None = None
     #: Até que harmônico o perfil tem potência acima do ruído.
     advised_harmonics: int | None = None
+    #: O que o epatplot mediu sobre empilhamento.
+    pileup: object = None
     fold_file: Path | None = None
 
     source_spectrum: spectra.Spectrum | None = None
@@ -422,13 +424,14 @@ class Pipeline:
         events = self._require_selected()
         return regions.default_regions(events)
 
-    def check_pileup(self) -> Path:
+    def check_pileup(self) -> "epic.PileupCheck":
         events = self._require_selected()
         if self.state.source_region is None:
             raise RuntimeError("defina a região da fonte antes de checar empilhamento")
-        plot = epic.check_pileup(self.context, events, self.state.source_region.expression)
-        self.state.pileup_plot = plot
-        return plot
+        check = epic.check_pileup(self.context, events, self.state.source_region)
+        self.state.pileup = check
+        self.state.pileup_plot = check.plot
+        return check
 
     # -- F. timing --------------------------------------------------------
 

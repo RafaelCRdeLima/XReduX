@@ -9,7 +9,7 @@ modo Timing o detector lê uma única faixa e a fonte é um intervalo de colunas
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .base import TaskContext, selection_expression
@@ -29,9 +29,47 @@ class Region:
     expression: str
     kind: str                # circle | annulus | rawx | box
     description: str = ""
+    #: Geometria em unidades de detector, quando existe. Guardar isto é o que
+    #: permite derivar variantes da região — em especial a versão sem o núcleo,
+    #: que decide se uma sobra de duplos vem de empilhamento ou não.
+    geometry: dict = field(default_factory=dict)
 
     def __str__(self) -> str:
         return self.expression
+
+    def core(self, fraction: float = 0.4) -> "Region | None":
+        """Só a parte central, onde o brilho superficial é maior."""
+        if self.kind != "circle" or not self.geometry:
+            return None
+        x, y = self.geometry["x"], self.geometry["y"]
+        radius = self.geometry["radius"] * fraction
+        return Region(
+            expression=f"((X,Y) IN circle({x:.1f},{y:.1f},{radius:.1f}))",
+            kind="circle",
+            description=f"núcleo r={radius / DETECTOR_UNITS_PER_ARCSEC:.0f}\"",
+            geometry={"x": x, "y": y, "radius": radius},
+        )
+
+    def excluding_core(self, fraction: float = 0.4) -> "Region | None":
+        """A mesma região sem a parte central, onde o empilhamento se concentra.
+
+        O empilhamento é uma coincidência de dois fótons no mesmo quadro e em
+        pixels vizinhos, então cresce com o brilho superficial e vive no núcleo
+        da PSF. Excluir o núcleo e repetir o diagnóstico é o teste que separa
+        empilhamento de qualquer outra causa de sobra de duplos.
+        """
+        if self.kind != "circle" or not self.geometry:
+            return None
+        x, y = self.geometry["x"], self.geometry["y"]
+        radius = self.geometry["radius"]
+        inner = radius * fraction
+        return Region(
+            expression=f"((X,Y) IN annulus({x:.1f},{y:.1f},{inner:.1f},{radius:.1f}))",
+            kind="annulus",
+            description=f"anel {inner / DETECTOR_UNITS_PER_ARCSEC:.0f}\"–"
+                        f"{radius / DETECTOR_UNITS_PER_ARCSEC:.0f}\" (sem o núcleo)",
+            geometry={"x": x, "y": y, "inner": inner, "outer": radius},
+        )
 
 
 def circle(x: float, y: float, radius_arcsec: float) -> Region:
@@ -41,6 +79,7 @@ def circle(x: float, y: float, radius_arcsec: float) -> Region:
         expression=f"((X,Y) IN circle({x:.1f},{y:.1f},{radius:.1f}))",
         kind="circle",
         description=f"círculo r={radius_arcsec:.1f}\" em ({x:.0f},{y:.0f})",
+        geometry={"x": x, "y": y, "radius": radius},
     )
 
 
@@ -52,6 +91,7 @@ def annulus(x: float, y: float, inner_arcsec: float, outer_arcsec: float) -> Reg
         expression=f"((X,Y) IN annulus({x:.1f},{y:.1f},{inner:.1f},{outer:.1f}))",
         kind="annulus",
         description=f"anel {inner_arcsec:.0f}\"–{outer_arcsec:.0f}\" em ({x:.0f},{y:.0f})",
+        geometry={"x": x, "y": y, "inner": inner, "outer": outer},
     )
 
 

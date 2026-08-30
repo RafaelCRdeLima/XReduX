@@ -276,12 +276,37 @@ class RegionsPage(Page):
         if pipeline is None or pipeline.state.source_region is None:
             self.set_status(t("regions.apply_first"), "failed")
             return
-        self.run_task(pipeline.check_pileup,
-                      lambda path: self._summary.setText(t("regions.pileup_ready",
-                                                           path=str(path))),
+        self.run_task(pipeline.check_pileup, self._pileup_done,
                       t("regions.checking_pileup"), advance=False)
 
     # -- apresentação -----------------------------------------------------
+
+    def _pileup_done(self, check) -> None:
+        """Diz o que as razões do epatplot significam, não só onde ficou o PDF.
+
+        Sozinhas elas não respondem nada: falta de simples com sobra de duplos é
+        a assinatura do empilhamento, mas espectro muito mole produz a mesma
+        assinatura. Quem separa as duas coisas é a taxa de contagem.
+        """
+        linhas = [t("regions.pileup_ready", path=str(check.plot))]
+        if check.doubles is not None:
+            linhas.append(t("regions.pileup_fractions",
+                            s=f"{check.singles[0]:.3f}", se=f"{check.singles[1]:.3f}",
+                            d=f"{check.doubles[0]:.3f}", de=f"{check.doubles[1]:.3f}"))
+        if check.core is not None and check.wings is not None:
+            linhas.append(t("regions.pileup_parts",
+                            core=f"{check.core.doubles[0]:.3f}",
+                            core_error=f"{check.core.doubles[1]:.3f}",
+                            wings=f"{check.wings.doubles[0]:.3f}",
+                            wings_error=f"{check.wings.doubles[1]:.3f}"))
+        gradient = check.gradient_sigma()
+        linhas.append(t(f"regions.pileup_{check.verdict()}",
+                        rate=f"{check.rate_ct_s:.2f}",
+                        photons=f"{check.photons_per_frame():.3f}",
+                        frame=f"{check.frame_time_s * 1000:.1f}",
+                        gradient=f"{gradient:+.1f}" if gradient is not None else "—"))
+        self._summary.setText("\n".join(linhas))
+        self.set_status(t("status.done"), "done")
 
     def refresh(self) -> None:
         pipeline = self.window.pipeline
