@@ -376,5 +376,85 @@ class EfsearchParsingTest(unittest.TestCase):
         self.assertEqual(chi2.size, 0)
 
 
+class BlindSearchTest(unittest.TestCase):
+    """Achar o período sem saber qual é tem três armadilhas, todas medidas."""
+
+    def _times(self, period: float, harmonic: int = 1, amplitude: float = 0.5,
+               second: float = 0.0, draws: int = 300_000,
+               span: float = 15_000.0) -> np.ndarray:
+        """Tempos com modulação no harmônico pedido, e opcionalmente no dobro."""
+        generator = np.random.default_rng(20260830)
+        times = np.sort(generator.random(draws) * span)
+        phase = (times / period) % 1.0
+        shape = (1.0 + amplitude * np.cos(2 * np.pi * harmonic * phase)
+                 + second * np.cos(4 * np.pi * harmonic * phase))
+        keep = generator.random(draws) < shape / (1.0 + amplitude + abs(second))
+        return times[keep]
+
+    def test_the_fundamental_stands_out_from_its_neighbourhood(self) -> None:
+        times = self._times(10.0)
+        frequency = 0.1
+        peak = float(timing.z_squared_n(times, np.array([frequency]), harmonics=1)[0])
+        around = timing._neighbourhood_z1(times, frequency)
+        self.assertGreater(peak / around, timing.FUNDAMENTAL_CONTRAST)
+
+    def test_a_subharmonic_carries_no_fundamental(self) -> None:
+        """Dobrar em 3P dá perfil que se repete, e o teste H acusa — Z²₁ não."""
+        times = self._times(10.0)
+        third = 1.0 / 30.0
+        statistic, _ = timing.h_test(times, third)
+        fundamental = float(timing.z_squared_n(times, np.array([third]),
+                                               harmonics=1)[0])
+        self.assertGreater(statistic, 20.0)          # o teste H se engana
+        self.assertLess(fundamental / timing._neighbourhood_z1(times, third),
+                        timing.FUNDAMENTAL_CONTRAST)  # Z²₁ não
+
+    def test_red_noise_is_rejected_by_the_contrast(self) -> None:
+        """Z²₁ alto com vizinhança igualmente alta não é pulsação."""
+        loud = timing.Candidate(period_s=443.0, power=60.0, fundamental=398.6,
+                                neighbourhood=253.0, h_statistic=499.8, harmonics=6)
+        self.assertGreater(loud.fundamental, timing.FUNDAMENTAL_THRESHOLD)
+        self.assertFalse(loud.has_fundamental())
+
+    def test_a_real_pulsation_passes_both_criteria(self) -> None:
+        real = timing.Candidate(period_s=10.314, power=14.8, fundamental=39.5,
+                                neighbourhood=1.8, h_statistic=80.4, harmonics=6)
+        self.assertTrue(real.has_fundamental())
+
+    def test_the_contrast_threshold_matches_the_absolute_one(self) -> None:
+        """Sob ruído branco os dois critérios dizem a mesma coisa."""
+        median = float(np.median(np.random.default_rng(1).chisquare(2, 200_000)))
+        self.assertAlmostEqual(timing.FUNDAMENTAL_THRESHOLD / median,
+                               timing.FUNDAMENTAL_CONTRAST, delta=0.3)
+
+    def test_climbing_turns_a_harmonic_into_the_fundamental(self) -> None:
+        """Dois picos por rotação, de alturas diferentes — o caso da RBS 1223.
+
+        O periodograma põe o máximo no segundo harmônico, em P/2. É a diferença
+        entre os dois picos que deixa potência no fundamental e permite subir.
+        """
+        times = self._times(10.0, amplitude=0.2, second=0.5)
+        empty = np.empty(0)
+        climbed = timing._climb_to_fundamental(times, 1.0 / 5.0, empty, empty, 3)
+        self.assertIsNotNone(climbed)
+        self.assertAlmostEqual(climbed.period_s, 10.0, delta=0.05)
+
+    def test_two_identical_peaks_are_genuinely_ambiguous(self) -> None:
+        """Sem diferença entre os picos, 10 s e 5 s são a mesma coisa.
+
+        Não é limitação do método: um perfil que se repete exatamente a cada
+        meia rotação não contém informação que distinga um período do outro.
+        Subir seria inventar o que o dado não diz.
+        """
+        times = self._times(10.0, harmonic=2)
+        self.assertIsNone(timing._climb_to_fundamental(times, 1.0 / 5.0,
+                                                       np.empty(0), np.empty(0), 3))
+
+    def test_climbing_stops_at_a_true_fundamental(self) -> None:
+        times = self._times(10.0)
+        self.assertIsNone(timing._climb_to_fundamental(times, 0.1, np.empty(0),
+                                                       np.empty(0), 3))
+
+
 if __name__ == "__main__":
     unittest.main()

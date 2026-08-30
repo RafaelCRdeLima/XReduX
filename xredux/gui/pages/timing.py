@@ -51,6 +51,9 @@ class TimingPage(Page):
         self._trials.setRange(9, 20_001)
         self._trials.setValue(401)
 
+        self._find_button = QPushButton(self)
+        self._find_button.clicked.connect(self._find)
+
         self._search_button = QPushButton(self)
         self._search_button.clicked.connect(self._search)
 
@@ -77,6 +80,7 @@ class TimingPage(Page):
 
         self._search_group = QGroupBox(self)
         search_layout = QVBoxLayout(self._search_group)
+        search_layout.addLayout(row(self._find_button))
         search_layout.addLayout(row(self._period_label, self._period,
                                     self._trials_label, self._trials,
                                     self._search_button))
@@ -130,6 +134,36 @@ class TimingPage(Page):
     def _light_curve_ready(self, curve) -> None:
         self._results.setText(t("timing.lc_ready", rate=f"{curve.mean_rate():.4f}",
                                 bins=len(curve.time)))
+
+    def _find(self) -> None:
+        """Busca ampla: acha o período sem que o usuário precise saber qual é."""
+        pipeline = self.window.pipeline
+        if pipeline is None or pipeline.state.light_curve is None:
+            self.set_status(t("timing.need_lc"), "failed")
+            return
+        self.run_task(pipeline.find_period, self._found,
+                      t("timing.finding"), advance=False)
+
+    def _found(self, candidates) -> None:
+        real = [item for item in candidates if item.has_fundamental()]
+        if not real:
+            self._results.setText(t("timing.no_candidate"))
+            self.set_status(t("timing.no_candidate_short"), "failed")
+            return
+        best = real[0]
+        self._period.setValue(best.period_s)
+        linhas = [t("timing.found", period=f"{best.period_s:.6f}",
+                    z=f"{best.fundamental:.1f}",
+                    contrast=f"{best.contrast():.1f}")]
+        # Os outros candidatos, com o número que decidiu entre eles: é o que
+        # permite ao usuário discordar com fundamento.
+        outros = [item for item in candidates if item is not best][:4]
+        if outros:
+            linhas.append(t("timing.others", items="; ".join(
+                f"{item.period_s:.4f} s (contraste {item.contrast():.1f})"
+                for item in outros)))
+        self._results.setText("\n".join(linhas))
+        self.set_status(t("status.done"), "done")
 
     def _search(self) -> None:
         pipeline = self.window.pipeline
@@ -288,6 +322,7 @@ class TimingPage(Page):
         self._lc_button.setText(t("timing.extract_lc"))
         self._period_label.setText(t("timing.period"))
         self._trials_label.setText(t("timing.trials"))
+        self._find_button.setText(t("timing.find"))
         self._search_button.setText(t("timing.search"))
         self._harmonics_label.setText(t("timing.harmonics"))
         self._refine_button.setText(t("timing.refine"))

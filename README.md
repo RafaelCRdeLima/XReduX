@@ -211,6 +211,31 @@ RBS 1223, cujo perfil tem dois picos por rotação, o fundamental dá 5,13% e o 
 dá **11,43%** — Z²₁ = 85 contra Z²₃ = 830, ou seja, quase 90% da potência está
 nos harmônicos que o fundamental ignora.
 
+## Busca de período sem candidato prévio
+
+O `efsearch` varre uma vizinhança de um período que se informa — serve para
+refinar, não para achar. **Procurar período (powspec)** faz a busca ampla, e
+precisa desviar de três armadilhas, todas medidas nas observações deste
+repositório:
+
+| armadilha | o que acontece | como se resolve |
+|---|---|---|
+| harmônico | num perfil de dois picos, o maior pico do periodograma é P/2 — na 0844140101, 5,155 s com potência 93 contra 10,317 s com 16 | subir a escada enquanto 2P ou 3P ainda tiverem fundamental |
+| subharmônico | dobrar em 3P repete o perfil três vezes e o teste H acusa: H = 45 em 30,95 s | exigir potência no fundamental Z²₁, que num subharmônico é ruído (2,0 contra 39,5) |
+| ruído vermelho | a potência cresce para frequências baixas; Z²₁ = 399 em 443 s sem pulsação nenhuma | comparar Z²₁ com a **vizinhança**, não com um limiar fixo — ali o contraste é 1,6, contra 22 no período verdadeiro |
+
+O limiar de contraste não é escolhido a dedo: sob ruído branco a mediana de Z²₁
+é 1,38, então exigir contraste 10 diz o mesmo que o limiar absoluto de 13,8 —
+só que medindo o ruído onde ele está.
+
+São 30 picos do periodograma, e não os cinco mais altos: na 0412601301, cuja
+fração pulsada é 1,3%, o pico verdadeiro fica em 25º lugar entre 65 mil
+frequências.
+
+Verificado às cegas nas duas fontes: 10,31089 s para a RBS 1223 (literatura
+10,31 s) e 7,05523 s para a RX J1856.5-3754 (Tiengo & Mereghetti 2007:
+7,055 s).
+
 ## Arquivamento
 
 As observações ficam agrupadas pela fonte, não soltas pelo ObsID:
