@@ -539,5 +539,64 @@ class TimingPersistenceTest(unittest.TestCase):
             self.assertAlmostEqual(reopened.state.period_s, 10.31)
 
 
+class CalibrationRestoreTest(unittest.TestCase):
+    """Os produtos no disco valem mais que o registro da sessão.
+
+    Uma etapa marcada como falha não registra saída nenhuma. A calibração era a
+    única peça que dependia desse registro, então a página reabria vazia com o
+    ccf.cif e o SUM.SAS ali do lado.
+    """
+
+    SUMMARY = ("RBS1223 / target name\n"
+               "13.1468611 / target right ascension\n"
+               "21.4522222 / target declination\n")
+
+    def _pipeline(self, work: Path):
+        from xredux.config import Settings
+        from xredux.pipeline import Pipeline
+        from xredux.tasks.base import TaskContext
+
+        session = Session.load_or_create(work, "0844140101", "RBS1223")
+        context = TaskContext(runner=ProcessRunner(), env={}, session=session,
+                              work_dir=work)
+        return Pipeline(Settings(), session, context)
+
+    def test_failed_calibration_recovers_from_the_products_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "odf").mkdir()
+            (work / "ccf.cif").write_text("", encoding="utf-8")
+            (work / "3666_0844140101_SCX00000SUM.SAS").write_text(
+                self.SUMMARY, encoding="latin-1")
+
+            pipeline = self._pipeline(work)
+            pipeline.session.begin("calibration")
+            pipeline.session.fail("calibration", "odfingest terminou com código 1")
+
+            reopened = self._pipeline(work)
+            restored = reopened.restore()
+
+            self.assertIn("calibração", restored)
+            self.assertEqual(reopened.state.ccf_cif, work / "ccf.cif")
+            self.assertEqual(reopened.state.sum_sas,
+                             work / "3666_0844140101_SCX00000SUM.SAS")
+            self.assertEqual(reopened.state.setup.target, "RBS1223")
+            # A ascensão reta do sumário vem em horas.
+            self.assertAlmostEqual(reopened.state.ra, 197.2029165, places=5)
+            # E a etapa deixa de mostrar falha ao lado de uma página cheia.
+            self.assertTrue(reopened.session.is_done("calibration"))
+
+    def test_absent_products_leave_the_failure_standing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            pipeline = self._pipeline(work)
+            pipeline.session.begin("calibration")
+            pipeline.session.fail("calibration", "odfingest terminou com código 1")
+
+            reopened = self._pipeline(work)
+            self.assertNotIn("calibração", reopened.restore())
+            self.assertFalse(reopened.session.is_done("calibration"))
+
+
 if __name__ == "__main__":
     unittest.main()
