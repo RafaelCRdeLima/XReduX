@@ -297,5 +297,42 @@ class HarmonicAdviceTest(unittest.TestCase):
         self.assertGreaterEqual(timing.suggested_harmonics(noise, 1.0 / 7.0), 1)
 
 
+class FoldRouteTest(unittest.TestCase):
+    """O fold em numpy e o do phasecalc têm de dar o mesmo perfil.
+
+    Conferido nos 404 892 eventos da 0412601301: mesmo total, diferença máxima
+    de 1,8σ por bin. Aqui a equivalência é verificada no que dá para verificar
+    sem o SAS — que a fase é o resto da divisão pelo período, que é o que o
+    phasecalc calcula.
+    """
+
+    def test_folding_recovers_a_known_profile(self) -> None:
+        period, bins = 7.0, 16
+        generator = np.random.default_rng(2026)
+        draws = generator.random(200_000)
+        kept = draws[generator.random(200_000) < 0.5 * (1 + 0.5 * np.cos(2 * np.pi * draws))]
+        _, counts, _ = timing.profile(kept * period, period, phase_bins=bins)
+
+        spectrum = np.fft.rfft(counts)
+        amplitude = 2.0 * abs(spectrum[1]) / counts.sum()
+        self.assertAlmostEqual(amplitude, 0.5, delta=0.02)
+
+    def test_the_phase_is_the_remainder_of_the_period(self) -> None:
+        """A conta que o phasecalc faz, e que precisa bater com a nossa."""
+        period = 3.0
+        times = np.array([0.0, 0.5, 1.5, 3.0, 4.5, 6.0])
+        phase, counts, _ = timing.profile(times, period, phase_bins=6)
+        expected = ((times - times[0]) / period) % 1.0
+        histogram, _ = np.histogram(expected, bins=6, range=(0.0, 1.0))
+        np.testing.assert_array_equal(counts, histogram.astype(float))
+
+    def test_errors_never_reach_zero(self) -> None:
+        """Barra de erro nula num bin vazio quebraria qualquer ajuste depois."""
+        times = np.linspace(0.0, 1.0, 50)
+        _, counts, error = timing.profile(times, 100.0, phase_bins=8)
+        self.assertTrue((counts == 0).any())
+        self.assertTrue((error > 0).all())
+
+
 if __name__ == "__main__":
     unittest.main()

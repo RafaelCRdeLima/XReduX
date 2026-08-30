@@ -239,8 +239,8 @@ class TimingPage(Page):
         bins = self._phase_bins.value()
 
         def work():
-            path = pipeline.fold(phase_bins=bins)
-            return path
+            pipeline.state.profile_bundle = None
+            return pipeline.fold(phase_bins=bins)
 
         self.run_task(work, self._folded, t("timing.folding"), advance=False)
 
@@ -253,12 +253,20 @@ class TimingPage(Page):
             return
         if pipeline.state.period_s is None:
             return
-        band = (self._low.value(), self._high.value())
-        times = timing_tasks.read_arrival_times(pipeline.state.barycentered, band_ev=band)
-        phase, counts, error = timing_tasks.profile(
-            times, pipeline.state.period_s, phase_bins=self._phase_bins.value())
-        self._profile_plot.show_profile(np.asarray(phase), counts, error,
-                                        pipeline.state.period_s)
+        bundle = pipeline.state.profile_bundle
+        if bundle is not None:
+            phase, counts, error = bundle
+        else:
+            # Antes de dobrar, um esboço: os tempos da região da fonte, não o
+            # campo inteiro — somar o fundo por cima dilui a modulação e o
+            # perfil aparece mais raso do que é.
+            band = (self._low.value(), self._high.value())
+            table = pipeline.state.source_event_list or pipeline.state.barycentered
+            times = timing_tasks.read_arrival_times(table, band_ev=band)
+            phase, counts, error = timing_tasks.profile(
+                times, pipeline.state.period_s, phase_bins=self._phase_bins.value())
+        self._profile_plot.show_profile(np.asarray(phase), np.asarray(counts),
+                                        np.asarray(error), pipeline.state.period_s)
 
     # -- apresentação -----------------------------------------------------
 
