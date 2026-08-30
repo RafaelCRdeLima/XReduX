@@ -575,11 +575,24 @@ class Pipeline:
         return refined
 
     def fold(self, phase_bins: int = 32) -> Path:
+        """Dobra o perfil de pulso.
+
+        Duas saídas, de propósito. O ``efold`` produz o FITS de curva dobrada,
+        que é o produto padrão que se espera de uma redução do XMM. E o
+        ``phasecalc`` dobra os **tempos de chegada da região da fonte**, que é o
+        perfil que a tela mostra: sem a grade da curva binada, e sem o campo
+        inteiro somado por cima da fonte.
+        """
         if self.state.light_curve is None or self.state.period_s is None:
             raise RuntimeError("é preciso ter curva de luz e período")
         path = timing.fold_profile(self.context, self.state.light_curve,
                                    self.state.period_s, phase_bins=phase_bins)
         self.state.fold_file = path
+
+        table = self.state.source_event_list or self.state.barycentered
+        if table is not None:
+            self.state.profile_bundle = timing.fold_events(
+                self.context, table, self.state.period_s, phase_bins=phase_bins)
         return path
 
     def source_events(self, band_ev: tuple[int, int] | None = None) -> Path:
