@@ -232,6 +232,16 @@ por texto criaria duas pastas para uma fonte só. Duas observações a menos de 
 uma da outra vão para a mesma pasta, e os nomes alternativos ficam registrados
 como apelidos no `source.json`.
 
+O nome canônico registrado ali é o que identifica tudo o que sai da redução:
+título da janela, cabeçalho de cada gráfico, nome dos arquivos exportados e
+metadados do CSV do PULSARIS. É o nome do arquivo que vale, não o que a sessão
+guardou no dia — a sessão pode ter registrado um apelido.
+
+Como a designação que encabeça uma figura é escolha editorial (a mesma fonte é
+`RBS 1223` ou `RX J1308.6+2127` conforme a revista), **Renomear fonte…** no
+seletor troca o nome e guarda o anterior como apelido. A posição não muda, então
+o agrupamento continua funcionando.
+
 Na interface, **Usar ODF local** lista o que já está no disco — fontes,
 observações e quais têm ODF extraído — em vez de abrir um navegador de arquivos.
 

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QPushButton, QSpi
 
 from ...export import profile as profile_export
 from ...export import pulsaris as pulsaris_export
+from ...archive import file_stem
 from ...i18n import t
 from ...tasks import absorption
 from .base import Page, row
@@ -66,7 +67,10 @@ class ExportPage(Page):
         events = state.selected
         band = (self._low.value(), self._high.value())
         maximum = pulsaris_export.max_events_for_upload() if self._limit.isChecked() else None
-        output = pipeline.work_dir / f"{state.obsid}_{events.instrument.lower()}_pulsaris_events.csv"
+        # O nome da fonte entra no arquivo: um CSV solto chamado só pelo ObsID
+        # não diz de que objeto é quando chega ao ajuste, meses depois.
+        stem = file_stem(state.target, state.obsid)
+        output = pipeline.work_dir / f"{stem}_{events.instrument.lower()}_pulsaris_events.csv"
         rmf = state.source_spectrum.rmf if state.source_spectrum else None
         region = state.source_region.description if state.source_region else ""
 

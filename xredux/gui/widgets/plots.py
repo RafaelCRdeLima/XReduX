@@ -19,6 +19,11 @@ from ...i18n import t
 class PlotCanvas(QWidget):
     """Canvas matplotlib com barra de navegação."""
 
+    #: Fonte e observação que identificam todo gráfico desta sessão.
+    #: Sem isto uma figura salva não diz de que objeto ela é — e é o nome da
+    #: fonte que encabeça a figura num artigo.
+    subject: str = ""
+
     def __init__(self, parent: QWidget | None = None, height: float = 3.2) -> None:
         super().__init__(parent)
         self.figure = Figure(figsize=(6.0, height), layout="constrained")
@@ -42,6 +47,10 @@ class PlotCanvas(QWidget):
     def draw(self) -> None:
         self.canvas.draw_idle()
 
+    def title(self, detail: str) -> str:
+        """Título com a fonte na primeira linha e o detalhe na segunda."""
+        return f"{self.subject}\n{detail}" if self.subject else detail
+
 
 class BackgroundCurvePlot(PlotCanvas):
     """Curva de fundo com a linha de corte que o usuário ajusta."""
@@ -62,7 +71,7 @@ class BackgroundCurvePlot(PlotCanvas):
                      label=t("filtering.threshold_label", value=f"{threshold:.3f}"))
         axes.set_xlabel(t("plot.time_s"))
         axes.set_ylabel(t("plot.rate"))
-        axes.set_title(t("filtering.plot_title", binsize=f"{binsize_s:g}"))
+        axes.set_title(self.title(t("filtering.plot_title", binsize=f"{binsize_s:g}")))
         axes.legend(loc="upper right", fontsize=8)
         axes.grid(alpha=0.25)
         self.draw()
@@ -80,7 +89,7 @@ class PeriodogramPlot(PlotCanvas):
                      label=t("timing.best_period", value=f"{best:.9g}"))
         axes.set_xlabel(t("plot.period_s"))
         axes.set_ylabel(method)
-        axes.set_title(t("timing.search_title", method=method))
+        axes.set_title(self.title(t("timing.search_title", method=method)))
         axes.legend(loc="upper right", fontsize=8)
         axes.grid(alpha=0.25)
         self.draw()
@@ -100,7 +109,7 @@ class ProfilePlot(PlotCanvas):
                           fmt="o-", ms=3, lw=0.9, color="#4f8cff", ecolor="#8aa0c0")
         axes.set_xlabel(t("plot.phase"))
         axes.set_ylabel(t("plot.counts"))
-        axes.set_title(t("timing.profile_title", period=f"{period_s:.9g}"))
+        axes.set_title(self.title(t("timing.profile_title", period=f"{period_s:.9g}")))
         axes.grid(alpha=0.25)
         self.draw()
 
@@ -123,7 +132,7 @@ class SpectrumPlot(PlotCanvas):
         axes.set_yscale("log")
         axes.set_xlabel(label_x)
         axes.set_ylabel(t("plot.counts"))
-        axes.set_title(t("spectra.plot_title"))
+        axes.set_title(self.title(t("spectra.plot_title")))
         axes.legend(loc="upper right", fontsize=8)
         axes.grid(alpha=0.25)
         self.draw()
@@ -236,7 +245,7 @@ class ImagePlot(PlotCanvas):
         finite = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
         scaled = np.log10(np.clip(finite, 0.0, None) + 1.0)
         axes.imshow(scaled, origin="lower", cmap="magma", aspect="equal")
-        axes.set_title(title or t("regions.image_title"))
+        axes.set_title(self.title(title or t("regions.image_title")))
         self._has_image = True
         self.set_regions(source, background)
 

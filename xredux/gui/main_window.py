@@ -29,6 +29,7 @@ from .pages.regions import RegionsPage
 from .pages.spectra import SpectraPage
 from .pages.timing import TimingPage
 from .widgets.console import LogConsole
+from .widgets.plots import PlotCanvas
 
 PAGE_CLASSES = (AcquisitionPage, CalibrationPage, ProcessingPage, FilteringPage,
                 RegionsPage, TimingPage, SpectraPage, ExportPage)
@@ -142,8 +143,13 @@ class MainWindow(QMainWindow):
         context = build_context(self.settings, self.session, on_line=self._log)
         self.pipeline = Pipeline(self.settings, self.session, context)
         self.pipeline.state.obsid = obsid
-        self.pipeline.state.target = target or self.session.target
+        # O nome canônico do arquivo vence o que a sessão guardou: é ele que vai
+        # aos títulos das figuras, e a sessão pode ter registrado um apelido.
+        source = self.settings.archive().source_of(work_dir)
+        self.pipeline.state.target = (source.name if source is not None
+                                      else target or self.session.target)
 
+        self._label_plots()
         self._session_label.setText(t("window.session", obsid=obsid, path=str(work_dir)))
         self._log(f"$ # sessão {obsid} em {work_dir}")
 
@@ -154,6 +160,18 @@ class MainWindow(QMainWindow):
         self.update_step_marks()
         self.refresh_pages()
         return self.pipeline
+
+    def _label_plots(self) -> None:
+        """Põe fonte e ObsID no título da janela e de todo gráfico aberto."""
+        state = self.pipeline.state if self.pipeline is not None else None
+        subject = ""
+        if state is not None:
+            subject = " · ".join(part for part in (state.target, state.obsid) if part)
+        for canvas in self.findChildren(PlotCanvas):
+            canvas.subject = subject
+        # A fonte vem primeiro: o título trunca pelo fim na barra de tarefas.
+        self.setWindowTitle(f"{subject} — {t('window.title')}" if subject
+                            else t("window.title"))
 
     def pipeline_cancel(self) -> None:
         if self.pipeline is not None:
@@ -279,7 +297,7 @@ class MainWindow(QMainWindow):
     # -- tradução ---------------------------------------------------------
 
     def retranslate(self) -> None:
-        self.setWindowTitle(t("window.title"))
+        self._label_plots()
         self._dock.setWindowTitle(t("window.log"))
         self._open_action.setText(t("window.open_session"))
         self._script_action.setText(t("window.script"))
