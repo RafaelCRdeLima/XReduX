@@ -146,16 +146,7 @@ class ExportPage(Page):
                     rmf, background, band_ev=band)
                 extra["background_file"] = background.name
 
-            # O ARF e o RMF ao lado dos eventos: desde que o PULSARIS os aceita
-            # como entrada, eles são dado da observação e não subproduto. Ficavam
-            # na raiz com os nomes que o SAS deu — src.arf, src.rmf — e quem
-            # abria a pasta pulsaris/ não os encontrava.
-            for response, suffix in ((rmf, ".rmf"),
-                                     (state.source_spectrum.arf
-                                      if state.source_spectrum else None, ".arf")):
-                if response is not None and Path(response).is_file():
-                    shutil.copy(response, directory / f"{stem}_"
-                                f"{events.instrument.lower()}{suffix}")
+            self._copy_responses()
 
             return pulsaris_export.write(
                 source, output, extra=extra,
@@ -185,6 +176,35 @@ class ExportPage(Page):
 
     # -- perfil de instrumento --------------------------------------------
 
+    def _copy_responses(self) -> list[Path]:
+        """Põe o ARF e o RMF na pasta pulsaris/ da observação.
+
+        **Isto vivia dentro da exportação do CSV**, então quem apertava só
+        "construir perfil" ficava com uma pasta ``pulsaris/`` contendo apenas
+        ``profile/`` — sem resposta nenhuma ao lado. Os dois botões produzem
+        dado da mesma observação, e o ARF e o RMF pertencem a ela em qualquer
+        um dos caminhos.
+
+        Renomeia com o prefixo da fonte porque o SAS os entrega como ``src.arf``
+        e ``src.rmf``, nomes que não dizem de quem são assim que saem da pasta.
+        """
+        pipeline = self.window.pipeline
+        state = pipeline.state
+        if state.source_spectrum is None:
+            return []
+        stem = file_stem(state.target, state.obsid)
+        instrument = state.selected.instrument.lower()
+        directory = pipeline.work_dir / "pulsaris"
+        directory.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        for response, suffix in ((state.source_spectrum.rmf, ".rmf"),
+                                 (state.source_spectrum.arf, ".arf")):
+            if response is not None and Path(response).is_file():
+                destination = directory / f"{stem}_{instrument}{suffix}"
+                shutil.copy(response, destination)
+                written.append(destination)
+        return written
+
     def _build_profile(self) -> None:
         pipeline = self.window.pipeline
         state = pipeline.state if pipeline else None
@@ -202,15 +222,21 @@ class ExportPage(Page):
         spectrum = state.source_spectrum
 
         def work():
-            return profile_export.build(
+            # As respostas vão para pulsaris/ aqui também: este botão pode ser
+            # o único que o usuário aperta.
+            copied = self._copy_responses()
+            bundle = profile_export.build(
                 pulsaris_root, output_dir, identifier=identifier,
                 label=f"XMM-Newton / {events.instrument} {state.obsid}",
                 instrument=f"{events.instrument} {events.mode} {events.filter_name}".strip(),
                 arf=spectrum.arf, rmf=spectrum.rmf,
                 energy_range_kev=band,
                 time_resolution_us=events.time_resolution_us(),
+                target=state.target, obsid=state.obsid,
                 calibration=(f"ARF e RMF gerados pelo SAS para a observação "
                              f"{state.obsid}, região {state.source_region.description}."))
+            bundle.warnings.extend(f"resposta copiada para {path}" for path in copied)
+            return bundle
 
         self.run_task(work, self._profile_done, t("export.building_profile"),
                       advance=False)

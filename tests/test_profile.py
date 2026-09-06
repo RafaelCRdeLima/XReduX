@@ -211,10 +211,62 @@ class ProfileInstallTest(unittest.TestCase):
 
     def test_raw_products_are_copied_for_provenance(self) -> None:
         profile_export.install(self.fake_root, self.bundle)
-        raw = self.fake_root / "instrument_data" / "raw" / "xmm_newton"
+        raw = (self.fake_root / "instrument_data" / "raw" / self.bundle.raw_dir)
         self.assertTrue((raw / self.arf.name).is_file())
         self.assertTrue((raw / self.rmf.name).is_file())
+
+    def test_the_manifest_path_is_where_the_file_landed(self) -> None:
+        """O caminho declarado e o caminho real tem de ser o mesmo.
+
+        Divergirem foi o defeito: o manifesto apontava para
+        raw/xmm_newton/src.arf enquanto o arquivo ali ja era de outra
+        observacao, e nada no programa notava.
+        """
+        profile_export.install(self.fake_root, self.bundle)
+        entrada = next(e for e in self.manifest()["profiles"]
+                       if e["id"] == self.bundle.identifier)
+        for bruto in entrada.get("raw_files", []):
+            with self.subTest(arquivo=bruto["path"]):
+                self.assertTrue((self.fake_root / bruto["path"]).is_file(),
+                                f"o manifesto declara {bruto['path']}, que nao existe")
+
+
+class RawDirectoryTest(unittest.TestCase):
+    """Cada observacao com a sua pasta, e nao todas na mesma.
+
+    O SAS entrega ARF e RMF como src.arf e src.rmf. Com uma pasta unica para
+    todas as observacoes, cada instalacao sobrescrevia a anterior em silencio,
+    e o manifesto — que guarda caminho E sha256 por perfil — seguia apontando
+    para dado de outra observacao. Medido no manifesto real do PULSARIS: o
+    perfil da 0844140101 ficou com hash que nao bate, porque a 0852980201
+    passou por cima.
+    """
+
+    def test_the_folder_carries_source_and_observation(self) -> None:
+        self.assertEqual(
+            profile_export.raw_subdirectory("RX J0720.4-3125", "0852980201"),
+            "RXJ0720.4-3125/0852980201")
+
+    def test_two_observations_never_share_a_folder(self) -> None:
+        um = profile_export.raw_subdirectory("RBS 1223", "0844140101")
+        outro = profile_export.raw_subdirectory("RX J0720.4-3125", "0852980201")
+        self.assertNotEqual(um, outro)
+
+    def test_the_same_source_keeps_its_observations_apart(self) -> None:
+        self.assertNotEqual(profile_export.raw_subdirectory("RBS 1223", "0163560101"),
+                            profile_export.raw_subdirectory("RBS 1223", "0844140101"))
+
+    def test_the_path_survives_the_sas(self) -> None:
+        """Nome de fonte com espaco e sinal nao pode entrar cru num caminho."""
+        caminho = profile_export.raw_subdirectory("RX J1308.6+2127", "0844140101")
+        self.assertNotIn(" ", caminho)
+        self.assertNotIn("+", caminho)
+
+    def test_a_source_without_a_name_still_separates_by_observation(self) -> None:
+        self.assertEqual(profile_export.raw_subdirectory("", "0844140101"), "0844140101")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+

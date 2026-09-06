@@ -16,12 +16,15 @@ região e esta posição no detector.
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..archive import compact_name
 from types import ModuleType
 
 MANIFEST_NAME = "manifest.json"
@@ -94,12 +97,42 @@ class ProfileBundle:
     arf: Path | None = None
     rmf: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Subpasta de instrument_data/raw/ onde o ARF e o RMF desta observação
+    #: ficam. Ver raw_subdirectory.
+    raw_dir: str = "xmm_newton"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for bloco in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(bloco)
+    return digest.hexdigest()
+
+
+def raw_subdirectory(target: str, obsid: str) -> str:
+    """Onde o ARF e o RMF de UMA observação ficam, dentro do PULSARIS.
+
+    **Isto era uma pasta só para todas as observações**, e o SAS nomeia os
+    arquivos ``src.arf`` e ``src.rmf`` — então cada instalação sobrescrevia a
+    anterior, em silêncio. Pior: o manifesto guarda o caminho E o sha256 de
+    cada perfil, e continuava apontando para um arquivo que já era de outra
+    observação. Medido no manifesto real: o perfil da 0844140101 ficou com
+    hash que não bate, porque a 0852980201 passou por cima.
+
+    O arranjo agora espelha o do próprio XREDUX, ``products/<fonte>/<obsid>/``,
+    porque quem abre a pasta espera reconhecer de quem é o dado sem consultar
+    índice nenhum.
+    """
+    compact = compact_name(target) if target else ""
+    return f"{compact}/{obsid}" if compact else obsid
 
 
 def build(pulsaris_root: Path, output_dir: Path, identifier: str, label: str,
           instrument: str, arf: Path | None, rmf: Path,
           energy_range_kev: tuple[float, float], time_resolution_us: float,
           dead_time_us: float = 0.0, calibration: str = "",
+          target: str = "", obsid: str = "",
           source_url: str = "https://www.cosmos.esa.int/web/xmm-newton") -> ProfileBundle:
     """Constrói o par ``.csv`` + ``.rmfbin`` do perfil a partir de ARF e RMF reais."""
     builder = load_pulsaris_builder(pulsaris_root)
@@ -150,17 +183,18 @@ def build(pulsaris_root: Path, output_dir: Path, identifier: str, label: str,
         "redistribution": "full_sparse_ogip_rmf",
         "raw_files": [],
     }
+    raw_dir = raw_subdirectory(target, obsid or identifier)
     for path in (arf, rmf):
         if path is not None and Path(path).is_file():
             entry["raw_files"].append({
-                "path": f"instrument_data/raw/xmm_newton/{Path(path).name}",
+                "path": f"instrument_data/raw/{raw_dir}/{Path(path).name}",
                 "download_url": source_url,
                 "sha256": builder.sha256(Path(path)),
             })
 
     return ProfileBundle(identifier=identifier, entry=entry, profile_csv=profile_csv,
                          response_bin=response_bin, arf=Path(arf) if arf else None,
-                         rmf=Path(rmf), warnings=warnings)
+                         rmf=Path(rmf), warnings=warnings, raw_dir=raw_dir)
 
 
 def preview_install(pulsaris_root: Path, bundle: ProfileBundle) -> list[str]:
@@ -171,7 +205,7 @@ def preview_install(pulsaris_root: Path, bundle: ProfileBundle) -> list[str]:
     """
     root = Path(pulsaris_root)
     profiles = root / "instrument_data" / "profiles"
-    raw = root / "instrument_data" / "raw" / "xmm_newton"
+    raw = root / "instrument_data" / "raw" / bundle.raw_dir
     manifest = profiles / MANIFEST_NAME
 
     actions = [
@@ -193,7 +227,7 @@ def install(pulsaris_root: Path, bundle: ProfileBundle) -> list[str]:
     """Instala o perfil no PULSARIS e devolve o que foi feito."""
     root = Path(pulsaris_root)
     profiles = root / "instrument_data" / "profiles"
-    raw = root / "instrument_data" / "raw" / "xmm_newton"
+    raw = root / "instrument_data" / "raw" / bundle.raw_dir
     manifest_path = profiles / MANIFEST_NAME
     if not profiles.is_dir():
         raise ProfileError(f"diretório de perfis do PULSARIS não encontrado: {profiles}")
@@ -203,10 +237,24 @@ def install(pulsaris_root: Path, bundle: ProfileBundle) -> list[str]:
     for source in (bundle.profile_csv, bundle.response_bin):
         shutil.copy2(source, profiles / source.name)
         done.append(str(profiles / source.name))
+    registrado = {Path(item["path"]).name: item.get("sha256")
+                  for item in bundle.entry.get("raw_files", [])}
     for path in (bundle.arf, bundle.rmf):
         if path is not None and path.is_file():
-            shutil.copy2(path, raw / path.name)
-            done.append(str(raw / path.name))
+            destino = raw / path.name
+            shutil.copy2(path, destino)
+            # Confere que o arquivo gravado é o que o manifesto vai declarar.
+            # Foi exatamente isto que faltou: com todas as observações caindo em
+            # raw/xmm_newton/src.arf, cada instalação sobrescrevia a anterior e o
+            # manifesto seguia apontando para dado de outra observação, com o
+            # hash de quando aquele perfil foi instalado. Ninguém percebia.
+            esperado = registrado.get(path.name)
+            if esperado and _sha256(destino) != esperado:
+                raise ProfileError(
+                    f"o arquivo instalado em {destino} não confere com o sha256 "
+                    f"que o manifesto declara para '{bundle.identifier}'. "
+                    "Outra observação escreveu por cima.")
+            done.append(str(destino))
 
     manifest = _read_manifest(manifest_path)
     manifest.setdefault("format", "PULSARIS_INSTRUMENT_PROFILES")
