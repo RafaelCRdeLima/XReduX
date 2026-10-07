@@ -574,5 +574,55 @@ class PileupRecordTest(ExportFixture):
         self.assertEqual(document["pileup"]["verdict"], "clean")
 
 
+class EpatplotPlotFailureTest(TemporaryDirectoryTest):
+    """Só o desenho falhou: as razões que o epatplot imprimiu continuam medida."""
+
+    OUTPUT = ("epatplot:- 0.5-2.0 keV observed-to-model fractions:\n"
+              "epatplot:- s: 0.967 +/- 0.024   d: 1.124 +/- 0.042\n"
+              "  File \"/opt/sas/bin/epatplot_graph.py\", line 35, in <module>\n"
+              "ModuleNotFoundError: No module named 'beautifultable'\n"
+              " ERROR while running epatplot_graph.py.\nSTOP 1\n")
+
+    def run_check(self, output: str):
+        from xredux.runner import CommandResult, TaskFailed
+        from xredux.tasks import epic
+
+        directory = self.directory
+
+        class Context:
+            work_dir = directory
+
+            def sas(self, step, task, parameters, cwd=None, timeout=None):
+                result = CommandResult([task], 1 if task == "epatplot" else 0, output,
+                                       0.1, str(directory))
+                if task == "evselect":
+                    write_list(Path(parameters["filteredset"]), [T0 + 1.0, T0 + 2.0])
+                    return result
+                raise TaskFailed(result)
+
+            def require(self, *paths):
+                raise AssertionError("o gráfico não existe; require não deveria ser chamado")
+
+        events = EventList(Path("raw.ds"), "EPN", "IMAGING", submode="PrimeLargeWindow")
+        return epic.check_pileup(Context(), events, "((X,Y) IN circle(1,1,600))",
+                                 with_core_test=False, gti=Path("gti.fits"))
+
+    def test_ratios_survive_a_plot_failure(self) -> None:
+        check = self.run_check(self.OUTPUT)
+        self.assertTrue(check.measured())
+        self.assertEqual(check.singles, (0.967, 0.024))
+        self.assertIn("beautifultable", check.plot_error)
+        self.assertIn("gti(gti.fits,TIME)", check.selection)
+        record = check.as_record()
+        self.assertFalse(record["plot_written"])
+        self.assertTrue(record["selected_events"].endswith("_pileup_evts.ds"))
+
+    def test_failure_without_ratios_is_still_a_failure(self) -> None:
+        from xredux.runner import TaskFailed
+
+        with self.assertRaises(TaskFailed):
+            self.run_check("Traceback\nModuleNotFoundError: x\nepatplot_graph.py\n")
+
+
 if __name__ == "__main__":
     unittest.main()

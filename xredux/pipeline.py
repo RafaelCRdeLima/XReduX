@@ -716,7 +716,9 @@ class Pipeline:
         self.session.step("pileup").parameters.update({
             "result": record, "outcome": record["outcome"], "verdict": record["verdict"]})
         self.session.finish("pileup", outputs=[check.plot],
-                            message=f"{record['outcome']}: {record['verdict']}")
+                            message=f"{record['outcome']}: {record['verdict']}"
+                            + (f" (gráfico não gerado: {check.plot_error})"
+                               if check.plot_error else ""))
         self.state.pileup = check
         self.state.pileup_plot = check.plot
         return check
@@ -1290,6 +1292,11 @@ class Pipeline:
             manifest_export.file_entry(spectrum.grouped, "spectrum_source_grouped",
                                        kind="input"),
             manifest_export.file_entry(state.pileup_plot, "pileup_plot", kind="input"),
+            # A seleção do diagnóstico de empilhamento: região, GTI e FLAG, sem
+            # o corte PATTERN<=4 — a única lista com os padrões múltiplos.
+            manifest_export.file_entry(
+                getattr(state.pileup, "selected", "") or None,
+                "events_pileup_selection", kind="input"),
         ]
         roles = {report.path: "csv_events", (phase.path if phase else None): "csv_phase_exposure"}
         for path in outputs:

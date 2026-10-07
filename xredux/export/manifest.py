@@ -69,6 +69,10 @@ def software() -> dict[str, Any]:
         record["xredux_dirty"] = bool(status.strip())
     except (OSError, subprocess.SubprocessError):
         pass
+    # No contêiner não há .git: quem lança a redução declara o commit, e a
+    # impressão digital acima é o que permite conferir a declaração.
+    if os.environ.get("XREDUX_COMMIT"):
+        record["xredux_commit_declared"] = os.environ["XREDUX_COMMIT"]
     for variable in ("SAS_DIR", "SAS_CCFPATH", "HEADAS"):
         if os.environ.get(variable):
             record[variable.lower()] = os.environ[variable]

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..runner import TaskFailed
 from .base import TaskContext, all_matching, selection_expression
 
 STEP_PN = "epproc"
@@ -305,6 +306,10 @@ class PileupCheck:
     gti: str = ""
     counts: int = 0
     live_s: float = 0.0
+    #: A lista selecionada (sem corte de PATTERN) que o epatplot leu.
+    selected: str = ""
+    #: Erro do auxiliar gráfico, quando só o desenho falhou e as razões saíram.
+    plot_error: str = ""
 
     def outcome(self) -> str:
         """``measured``, ``unmeasured`` ou ``inconclusive``.
@@ -332,6 +337,9 @@ class PileupCheck:
             "doubles_excess_sigma": self.doubles_excess_sigma(),
             "gradient_sigma": self.gradient_sigma(),
             "raw_tail": self.raw_tail or None,
+            "selected_events": self.selected or None,
+            "plot_written": Path(self.plot).is_file() if str(self.plot) else False,
+            "plot_error": self.plot_error or None,
         }
         for part in ("core", "wings"):
             check = getattr(self, part)
@@ -351,7 +359,9 @@ class PileupCheck:
                     raw_tail=record.get("raw_tail") or "",
                     events=record.get("events") or "", selection=record.get("selection") or "",
                     gti=record.get("gti") or "", counts=int(record.get("counts") or 0),
-                    live_s=float(record.get("live_s") or 0.0))
+                    live_s=float(record.get("live_s") or 0.0),
+                    selected=record.get("selected_events") or "",
+                    plot_error=record.get("plot_error") or "")
         for part in ("core", "wings"):
             if record.get(part):
                 setattr(check, part, cls.from_record(record[part]))
@@ -480,11 +490,25 @@ def check_pileup(context: TaskContext, events: EventList, source,
     # epatplot perde a barra inicial ao repassá-lo ao script que desenha, que
     # então tenta escrever em "home/rafael/..." e morre com FileNotFoundError.
     # Um nome relativo não tem barra a perder, e a tarefa roda no work_dir.
-    result = context.sas(STEP_PILEUP, "epatplot", {
-        "set": selected, "plotfile": output.name, "useplotfile": True,
-        "device": "/pdf",
-    }, cwd=context.work_dir, timeout=1800)
-    context.require(output)
+    plot_error = ""
+    try:
+        result = context.sas(STEP_PILEUP, "epatplot", {
+            "set": selected, "plotfile": output.name, "useplotfile": True,
+            "device": "/pdf",
+        }, cwd=context.work_dir, timeout=1800)
+    except TaskFailed as error:
+        # O epatplot calcula as razões e só depois chama o epatplot_graph.py
+        # para desenhar. Na imagem do contêiner o desenho morre por falta do
+        # módulo beautifultable, e a tarefa sai com código 1 depois de ter
+        # impresso as razões. Medida sem gráfico continua medida — com o erro
+        # registrado; qualquer outra falha, ou falha sem as razões, é falha.
+        result = error.result
+        text = getattr(result, "output", "") or ""
+        if not (_FRACTIONS.search(text) and "epatplot_graph" in text):
+            raise
+        plot_error = _last_error(text)
+    if not plot_error:
+        context.require(output)
 
     fractions = _FRACTIONS.search(getattr(result, "output", "") or "")
     counts, live = _counted(selected)
@@ -504,6 +528,7 @@ def check_pileup(context: TaskContext, events: EventList, source,
                  if fractions else None),
         events=str(events.path), selection=expression,
         gti=str(gti) if gti is not None else "", counts=counts, live_s=live,
+        selected=str(selected), plot_error=plot_error,
     )
     if not check.measured():
         tail = [line for line in (getattr(result, "output", "") or "").splitlines()
@@ -521,6 +546,17 @@ def check_pileup(context: TaskContext, events: EventList, source,
                 context, events, part, with_core_test=False, gti=gti,
                 output=output.with_name(f"{output.stem}_{attribute}.pdf")))
     return check
+
+
+def _last_error(text: str) -> str:
+    """A linha de erro mais informativa da saída de uma tarefa."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # A exceção do Python diz a causa; o "ERROR while running" do SAS, só o local.
+    for marker in (re.compile(r"\w+Error: "), re.compile(r"ERROR|Error")):
+        for line in reversed(lines):
+            if marker.search(line):
+                return line[:300]
+    return lines[-1][:300] if lines else ""
 
 
 def _counted(table: Path) -> tuple[int, float]:
