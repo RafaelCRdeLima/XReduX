@@ -12,6 +12,7 @@ assim que aparece.
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shlex
 import signal
@@ -27,8 +28,24 @@ _SAS_ERROR = re.compile(r"^\*\*\s+\S+:\s+error", re.IGNORECASE | re.MULTILINE)
 _SAS_WARNING = re.compile(r"^\*\*\s+\S+:\s+warning", re.IGNORECASE | re.MULTILINE)
 
 
+#: Quanto esperar depois do SIGTERM antes de matar o grupo com SIGKILL.
+KILL_GRACE_S = 5.0
+#: Intervalo com que o laço de execução confere prazo e cancelamento.
+_POLL_S = 0.05
+#: Depois de matar o grupo, quanto esperar o fim do pipe antes de desistir dele.
+_DRAIN_S = 2.0
+
+
 class Cancelled(RuntimeError):
-    """A execução foi interrompida a pedido do usuário."""
+    """A execução foi interrompida a pedido do usuário.
+
+    Leva o resultado parcial do comando interrompido, quando houver, para que a
+    sessão registre a tentativa: sem isso o comando cancelado some do registro.
+    """
+
+    def __init__(self, message: str, result: "CommandResult | None" = None) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 class TaskFailed(RuntimeError):
@@ -50,16 +67,21 @@ class CommandResult:
     cwd: str
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: O processo foi interrompido por exceder o tempo limite.
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.errors
+        return self.returncode == 0 and not self.errors and not self.timed_out
 
     def as_shell(self) -> str:
         return " ".join(shlex.quote(part) for part in self.command)
 
     def summary(self) -> str:
-        head = f"{self.command[0]} terminou com código {self.returncode}"
+        if self.timed_out:
+            head = f"{self.command[0]} excedeu o tempo limite e foi interrompido"
+        else:
+            head = f"{self.command[0]} terminou com código {self.returncode}"
         if self.errors:
             head += "\n" + "\n".join(self.errors[:5])
         elif not self.ok:
@@ -85,16 +107,17 @@ class ProcessRunner:
     # -- controle ---------------------------------------------------------
 
     def cancel(self) -> None:
-        """Interrompe a execução atual e bloqueia as próximas."""
+        """Interrompe a execução atual e bloqueia as próximas.
+
+        Só envia SIGTERM e volta: pode ser chamado da thread da interface, que
+        não deve esperar. Se o processo ignorar o sinal, o laço de ``run`` escala
+        para SIGKILL depois de ``KILL_GRACE_S``.
+        """
         with self._lock:
             self._cancelled = True
             process = self._process
         if process is not None and process.poll() is None:
-            # O SAS lança subprocessos; mata o grupo inteiro para não deixar órfãos.
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                process.terminate()
+            _signal_group(process, signal.SIGTERM)
 
     def reset(self) -> None:
         with self._lock:
@@ -141,17 +164,72 @@ class ProcessRunner:
         with self._lock:
             self._process = process
 
+        # A leitura fica numa thread própria. Lida aqui, ela bloquearia o laço
+        # enquanto o processo não escrevesse nada, e um comando silencioso nunca
+        # chegaria a conferir o prazo.
+        pending: "queue.Queue[str | None]" = queue.Queue()
+        reader = threading.Thread(target=_pump, args=(process.stdout, pending),
+                                  daemon=True)
+        reader.start()
+
+        deadline = started + timeout if timeout is not None else None
+        timed_out = False
+        eof = False
+        stop_sent_at: float | None = None
+        killed_at: float | None = None
+        exited_at: float | None = None
         try:
-            assert process.stdout is not None
-            for raw in process.stdout:
-                line = raw.rstrip("\n")
-                lines.append(line)
-                self._emit(line)
-                if timeout is not None and time.monotonic() - started > timeout:
-                    self.cancel()
-                    lines.append(f"** xredux: tempo limite de {timeout:.0f}s excedido")
-                    break
+            while True:
+                if eof:
+                    time.sleep(_POLL_S)
+                else:
+                    try:
+                        raw = pending.get(timeout=_POLL_S)
+                    except queue.Empty:
+                        pass
+                    else:
+                        if raw is None:  # o pipe fechou
+                            eof = True
+                        else:
+                            line = raw.rstrip("\n")
+                            lines.append(line)
+                            self._emit(line)
+
+                now = time.monotonic()
+                if process.poll() is not None:
+                    if eof:
+                        break
+                    # O processo saiu, mas algum neto ainda segura o pipe: dá um
+                    # prazo curto para o resto da saída e segue sem ele.
+                    exited_at = exited_at or now
+                    if now - exited_at > _DRAIN_S:
+                        break
+                    continue
+
+                if stop_sent_at is None:
+                    if deadline is not None and now > deadline:
+                        timed_out = True
+                        message = f"** xredux: tempo limite de {timeout:.0f}s excedido"
+                        lines.append(message)
+                        self._emit(message)
+                        _signal_group(process, signal.SIGTERM)
+                        stop_sent_at = now
+                    elif self.cancelled:
+                        stop_sent_at = now  # cancel() já enviou o SIGTERM
+                elif killed_at is None and now - stop_sent_at > KILL_GRACE_S:
+                    _signal_group(process, signal.SIGKILL)
+                    killed_at = now
             process.wait()
+            # O que já estava na fila quando o laço saiu ainda é saída do comando.
+            while True:
+                try:
+                    raw = pending.get_nowait()
+                except queue.Empty:
+                    break
+                if raw is not None:
+                    line = raw.rstrip("\n")
+                    lines.append(line)
+                    self._emit(line)
         finally:
             # Uma redução completa dispara centenas de tarefas; deixar o pipe
             # aberto a cada uma esgota os descritores do processo da interface.
@@ -161,14 +239,18 @@ class ProcessRunner:
                 self._process = None
 
         output = "\n".join(lines)
+        errors = [line for line in lines if _SAS_ERROR.match(line)]
+        if timed_out:
+            errors.append(f"tempo limite de {timeout:.0f}s excedido")
         result = CommandResult(
             command=command, returncode=process.returncode, output=output,
             duration_s=time.monotonic() - started, cwd=str(cwd),
-            errors=[line for line in lines if _SAS_ERROR.match(line)],
+            errors=errors,
             warnings=[line for line in lines if _SAS_WARNING.match(line)],
+            timed_out=timed_out,
         )
-        if self.cancelled:
-            raise Cancelled("execução cancelada")
+        if self.cancelled and not timed_out:
+            raise Cancelled("execução cancelada", result)
         return result
 
     def check(self, command: Sequence[str], **kwargs) -> CommandResult:
@@ -177,6 +259,29 @@ class ProcessRunner:
         if not result.ok:
             raise TaskFailed(result)
         return result
+
+
+def _pump(stream, pending: "queue.Queue[str | None]") -> None:
+    """Copia as linhas do pipe para a fila; ``None`` marca o fim."""
+    try:
+        if stream is not None:
+            for raw in stream:
+                pending.put(raw)
+    except (OSError, ValueError):
+        pass  # o pipe foi fechado enquanto se lia
+    finally:
+        pending.put(None)
+
+
+def _signal_group(process: subprocess.Popen, which: int) -> None:
+    """Envia ``which`` ao grupo do processo; o SAS lança subprocessos."""
+    try:
+        os.killpg(os.getpgid(process.pid), which)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.send_signal(which)
+        except (ProcessLookupError, OSError):
+            pass
 
 
 def sas_command(task: str, parameters: dict[str, object] | None = None,

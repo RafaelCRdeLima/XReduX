@@ -123,6 +123,11 @@ class Page(QWidget):
         if self.busy:
             self.set_status(t("status.already_running"), "running")
             return
+        other = self.window.busy_page()
+        if other is not None and other is not self:
+            self.set_status(t("status.busy_elsewhere", step=t(f"step.{other.key}")),
+                            "running")
+            return
 
         self.window.pipeline_runner_reset()
         self._set_busy(True)

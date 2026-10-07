@@ -16,13 +16,14 @@ A divisão de trabalho aqui é deliberada:
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from .base import TaskContext, selection_expression
+from .base import ProductMissing, TaskContext, selection_expression
 
 STEP_BARYCEN = "barycen"
 STEP_LIGHTCURVE = "lightcurve"
@@ -41,7 +42,11 @@ def barycenter(context: TaskContext, events: Path, ra: float, dec: float,
                ephemeris: str = DEFAULT_EPHEMERIS, output: Path | None = None) -> Path:
     """Corrige os tempos de chegada para o baricentro do Sistema Solar.
 
-    ``barycen`` altera a tabela no lugar, então trabalha-se sobre uma cópia.
+    ``barycen`` altera a tabela no lugar, então trabalha-se sobre uma cópia —
+    com nome provisório. Só depois de a tarefa terminar e o cartão ``TIMEREF``
+    confirmar a correção a cópia ganha o nome final. Antes, a cópia ganhava o
+    nome final antes de rodar o ``barycen``: uma falha ou um cancelamento
+    deixavam no lugar do produto uma lista NÃO corrigida, que a retomada aceitava.
 
     Uma única chamada basta: apesar de receber ``:EVENTS``, a tarefa corrige o
     conjunto inteiro, GTIs incluídas — verificado na observação 0412601301, em
@@ -50,21 +55,36 @@ def barycenter(context: TaskContext, events: Path, ra: float, dec: float,
     ``NoCorrectionNecessary``, porque a marca de correção é do arquivo todo.
     """
     output = output or events.with_name(events.stem + "_bary.fits")
-    if output.resolve() != events.resolve():
-        shutil.copy2(events, output)
-
-    if is_barycentered(output):
-        context.log(f"** xredux: {output.name} já está baricentrado; nada a fazer")
+    if is_barycentered(events):
+        context.log(f"** xredux: {events.name} já está baricentrado; nada a fazer")
+        if output.resolve() != events.resolve():
+            shutil.copy2(events, output)
+            context.session.record_action(STEP_BARYCEN, "cópia da lista já baricentrada",
+                                          shell=["cp", "-p", str(events), str(output)])
         return output
 
-    context.sas(STEP_BARYCEN, "barycen", {
-        "table": f"{output}:EVENTS",
-        "withsrccoordinates": True,
-        "srcra": f"{ra:.6f}", "srcdec": f"{dec:.6f}",
-        "ephemeris": ephemeris,
-    }, cwd=context.work_dir, timeout=3600)
-
-    context.require(output)
+    partial = output.with_name(f"{output.stem}.parcial.fits")
+    shutil.copy2(events, partial)
+    context.session.record_action(STEP_BARYCEN, "cópia de trabalho para o barycen",
+                                  shell=["cp", "-p", str(events), str(partial)])
+    try:
+        context.sas(STEP_BARYCEN, "barycen", {
+            "table": f"{partial}:EVENTS",
+            "withsrccoordinates": True,
+            "srcra": f"{ra:.6f}", "srcdec": f"{dec:.6f}",
+            "ephemeris": ephemeris,
+        }, cwd=context.work_dir, timeout=3600)
+        context.require(partial)
+        if not is_barycentered(partial):
+            raise ProductMissing(
+                f"barycen terminou sem marcar TIMEREF em {partial.name}; "
+                "a lista não foi corrigida")
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    os.replace(partial, output)
+    context.session.record_action(STEP_BARYCEN, "publicação da lista baricentrada",
+                                  shell=["mv", str(partial), str(output)])
     return output
 
 
@@ -766,6 +786,8 @@ def fold_events(context: TaskContext, table: Path, period_s: float,
 
     output = output or context.work_dir / f"{Path(table).stem}_phase.fits"
     shutil.copy(Path(table), output)
+    context.session.record_action(STEP_PHASE, "cópia de trabalho para o phasecalc",
+                                  shell=["cp", str(Path(table)), str(output)])
     if epoch is None:
         epoch = _observation_start(output)
 

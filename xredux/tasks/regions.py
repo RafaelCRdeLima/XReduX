@@ -72,6 +72,31 @@ class Region:
         )
 
 
+_SHAPE = re.compile(r"\(X,Y\)\s+IN\s+(circle|annulus)\(([^)]*)\)", re.IGNORECASE)
+
+
+def geometry_of(expression: str) -> tuple[str, dict]:
+    """Tipo e geometria de uma região a partir da própria expressão de seleção.
+
+    Sessões antigas guardavam só a expressão; ela basta para reconstruir um
+    círculo ou um anel exatamente, e com eles o núcleo e as asas do teste de
+    empilhamento. Outras formas devolvem ``("", {})``.
+    """
+    found = _SHAPE.search(expression or "")
+    if found is None:
+        return "", {}
+    try:
+        values = [float(part) for part in found.group(2).split(",")]
+    except ValueError:
+        return "", {}
+    kind = found.group(1).lower()
+    if kind == "circle" and len(values) == 3:
+        return kind, {"x": values[0], "y": values[1], "radius": values[2]}
+    if kind == "annulus" and len(values) == 4:
+        return kind, {"x": values[0], "y": values[1], "inner": values[2], "outer": values[3]}
+    return "", {}
+
+
 def circle(x: float, y: float, radius_arcsec: float) -> Region:
     """Círculo no plano do céu, com raio dado em segundos de arco."""
     radius = radius_arcsec * DETECTOR_UNITS_PER_ARCSEC
@@ -167,7 +192,7 @@ def extract_image(context: TaskContext, events: EventList, binsize: int = 80,
     Em modo Timing não existe eixo Y útil, então a imagem é RAWX contra TIME —
     que é exatamente o diagrama em que se enxerga a faixa da fonte e os flares.
     """
-    output = output or context.work_dir / f"{events.instrument.lower()}_image.fits"
+    output = output or context.work_dir / f"{events.product_prefix}_image.fits"
     if events.mode in {"TIMING", "BURST"}:
         parameters = {
             "xcolumn": "RAWX", "ycolumn": "TIME",

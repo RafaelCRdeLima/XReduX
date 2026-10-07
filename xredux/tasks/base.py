@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from ..runner import CommandResult, ProcessRunner, TaskFailed, sas_command
+from ..runner import Cancelled, CommandResult, ProcessRunner, TaskFailed, sas_command
 from ..session import Session
 
 
@@ -33,9 +33,19 @@ class TaskContext:
 
     def run(self, step: str, command: Sequence[str], cwd: Path | None = None,
             timeout: float | None = None) -> CommandResult:
-        """Executa um comando registrando-o na etapa ``step``."""
-        result = self.runner.run(command, env=self.env, cwd=cwd or self.work_dir,
-                                 timeout=timeout)
+        """Executa um comando registrando-o na etapa ``step``.
+
+        Um comando cancelado também é registrado, com o resultado parcial: a
+        sessão é o registro do que de fato rodou, interrompido ou não.
+        """
+        try:
+            result = self.runner.run(command, env=self.env, cwd=cwd or self.work_dir,
+                                     timeout=timeout)
+        except Cancelled as cancelled:
+            if cancelled.result is not None:
+                self.session.record_command(step, cancelled.result)
+                self.session.save()
+            raise
         self.session.record_command(step, result)
         return result
 

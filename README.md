@@ -166,6 +166,17 @@ O servidor do PULSARIS limita uploads a 100 MB. Uma observação longa do EPIC-p
 passa disso, então a exportação corta em banda de energia e, se ainda exceder,
 oferece decimação com semente registrada no cabeçalho — nunca silenciosamente.
 
+A decimação é um desbaste de Bernoulli: cada evento fica com probabilidade `p`,
+independentemente dos outros. Um processo de Poisson desbastado assim continua
+de Poisson, com taxa `p·λ`, então o CSV declara a exposição **efetiva**
+`exposure_s = p × LIVETIME`, e o fundo, que o ajuste multiplica pela mesma
+exposição, fica coerente. O cabeçalho traz `decimation_probability`,
+`decimation_seed`, `events_before_decimation` e `livetime_full_s`. A origem dos
+tempos é o `TSTART` da lista (`time_origin_s`, com `timesys` e `mjdref`), fixada
+antes do corte de banda e da decimação: trocar a banda ou a semente não desloca
+a fase. Eventos com energia fora da grade de canais da RMF ficam de fora, com
+aviso; sem RMF não há exportação, porque a coluna `PI` é o canal da resposta.
+
 ## Validação em RX J1856.5-3754
 
 O pipeline foi validado de ponta a ponta contra um resultado publicado, sobre a
@@ -314,9 +325,12 @@ o `epproc` falha reclamando de um arquivo de eventos, sem mencionar o sumário.
 
 O agrupamento é **por posição**, não por nome. A mesma fonte chega como
 `RBS1223` no sumário do ODF e como `RX J1308.6+2127` na busca por nome; casar
-por texto criaria duas pastas para uma fonte só. Duas observações a menos de 3′
+por texto criaria duas pastas para uma fonte só. Duas observações a menos de 1′
 uma da outra vão para a mesma pasta, e os nomes alternativos ficam registrados
-como apelidos no `source.json`.
+como apelidos no `source.json`. Entre 1′ e 3′ elas só se juntam se o nome ou um
+apelido também coincidir: proximidade sozinha fundiria fontes vizinhas
+distintas. Nomes diferentes que dariam a mesma pasta (`A B` e `AB`) recebem
+pastas com sufixo, em vez de uma sobrescrever o `source.json` da outra.
 
 O nome canônico registrado ali é o que identifica tudo o que sai da redução:
 título da janela, cabeçalho de cada gráfico, nome dos arquivos exportados e
@@ -343,10 +357,25 @@ python tools/organise_archive.py --apply    # move
 
 Cada observação tem seu diretório em `products/<fonte>/<ObsID>/` com:
 
-- `session.json` — estado de cada etapa, parâmetros, produtos, códigos de saída;
-- `reproduce.sh` — todos os comandos executados, em ordem, pronto para rodar.
+- `session.json` — estado de cada etapa, parâmetros, produtos, códigos de saída
+  e um diário de tudo o que rodou, na ordem em que rodou;
+- `reproduce.sh` — gerado a partir do diário: comandos externos e as ações do
+  próprio programa que têm equivalente em shell (`cp`, `mv`, `tar`), na ordem
+  real. Tentativas que falharam entram comentadas; ações sem equivalente (edição
+  de cabeçalho FITS, escrita do CSV) entram como `# [ação do XreduX]`.
 
 Uma redução interrompida é retomada de onde parou; `epproc` não se refaz à toa.
+
+**Procedência.** Mudar uma entrada invalida o que dependia dela: trocar de
+câmera/exposição, refazer a filtragem, mudar as regiões, refazer o `barycen` ou
+extrair outra curva de luz descarta os produtos derivados em memória e marca as
+etapas dependentes como desatualizadas (◍ na barra lateral). Os produtos levam
+câmera e exposição no nome (`epn_s003_clean.fits`). Na retomada, um arquivo só
+volta se a etapa que o gera estiver concluída na sessão e o cabeçalho confirmar
+câmera e exposição (`INSTRUME`, `EXPIDSTR`) — e, para a lista baricêntrica, o
+`TIMEREF`. O `barycen` trabalha numa cópia `.parcial.fits`, publicada só depois
+de validada. Sessões gravadas antes dessas regras são lidas com verificação de
+cabeçalho; o que não puder ser verificado é refeito sob demanda.
 
 ## Testes
 

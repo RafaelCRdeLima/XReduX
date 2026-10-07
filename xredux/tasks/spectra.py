@@ -170,6 +170,10 @@ def link_products(context: TaskContext, spectrum: Spectrum) -> None:
                 for keyword, value in updates.items():
                     if value:
                         header[keyword] = value
+            context.session.record_action(
+                STEP_SPECTRUM,
+                f"cartões {', '.join(k for k, v in updates.items() if v)} gravados em "
+                f"{target.name} (edição de cabeçalho feita pelo XreduX)")
         except (OSError, KeyError, ValueError) as error:
             context.log(f"** xredux: não foi possível anotar {target.name}: {error}")
 
@@ -269,7 +273,9 @@ def epoch_to_utc(events_path: Path) -> str | None:
 def phase_resolved(context: TaskContext, events: EventList, events_path: Path,
                    region_expression: str, period_s: float, phase_bins: int = 8,
                    epoch_utc: str | None = None,
-                   background_region: str | None = None) -> list[Spectrum]:
+                   background_region: str | None = None,
+                   rmf: Path | None = None, arf: Path | None = None,
+                   ccd: int | None = None) -> list[Spectrum]:
     """Extrai um espectro por intervalo de fase.
 
     É o produto que liga a geometria do modelo ao dado: cada fatia amostra uma
@@ -300,4 +306,124 @@ def phase_resolved(context: TaskContext, events: EventList, events_path: Path,
             spectrum.background = background.path
 
         spectra.append(spectrum)
+
+    # Cada fatia só acumula fótons durante a fração do tempo de boa observação
+    # em que a estrela estava naquela fase. O EXPOSURE gravado pelo evselect é o
+    # da observação inteira, porque o corte em PHASE não é um filtro de tempo;
+    # sem esta correção, fluxos e normalizações por fatia saem divididos pelo
+    # número de fatias. A fração vem das GTIs, não de 1/phase_bins: lacunas
+    # correlacionadas com a fase tornam a cobertura desigual.
+    fractions = phase_exposure_fractions(events_path, 1.0 / period_s,
+                                         _epoch_seconds(events_path, epoch_utc),
+                                         edges, ccd=ccd)
+    for spectrum, fraction in zip(spectra, fractions):
+        targets = [spectrum.path] + ([spectrum.background] if spectrum.background else [])
+        for target in targets:
+            exposure = _scale_exposure(target, float(fraction))
+            if target == spectrum.path:
+                spectrum.exposure_s = exposure
+        context.session.record_action(
+            STEP_PHASE, f"EXPOSURE de {spectrum.path.name} multiplicado pela cobertura "
+                        f"em fase {fraction:.6f} (edição do XreduX)")
+        # A fatia sai da mesma região da fonte: valem a RMF e o ARF médios.
+        spectrum.rmf, spectrum.arf = rmf, arf
+        if rmf is not None or arf is not None:
+            link_products(context, spectrum)
     return spectra
+
+
+def good_time_intervals(events_path: Path, ccd: int | None = None) -> np.ndarray:
+    """Intervalos de tempo bom da lista: a GTI do CCD cruzada com as do corte.
+
+    A extensão ``STDGTInn`` diz quando o CCD da fonte esteve lendo; as ``GTI*``
+    acrescentadas pela filtragem dizem quando o fundo estava calmo. O tempo
+    válido é a interseção das duas. Sem CCD informado, usa-se a primeira
+    ``STDGTI`` da lista.
+    """
+    from astropy.io import fits
+
+    with fits.open(events_path, memmap=False) as hdus:
+        names = [hdu.name.upper() for hdu in hdus]
+        chip = f"STDGTI{ccd:02d}" if ccd is not None else None
+        chosen = chip if chip in names else next(
+            (name for name in names if name.startswith("STDGTI")), None)
+        lists = []
+        for name in ([chosen] if chosen else []) + [
+                name for name in names if name.startswith("GTI")]:
+            data = hdus[name].data
+            if data is None or len(data) == 0:
+                continue
+            lists.append(np.column_stack([np.asarray(data["START"], dtype=float),
+                                          np.asarray(data["STOP"], dtype=float)]))
+    if not lists:
+        raise ValueError(f"{events_path.name} não traz GTI; a exposição por fase "
+                         "não pode ser calculada")
+    result = lists[0]
+    for other in lists[1:]:
+        result = _intersect(result, other)
+    return result
+
+
+def _intersect(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Interseção de duas listas de intervalos [início, fim)."""
+    pieces = []
+    for start, stop in first:
+        low = np.maximum(start, second[:, 0])
+        high = np.minimum(stop, second[:, 1])
+        keep = high > low
+        pieces.extend(zip(low[keep], high[keep]))
+    return np.array(sorted(pieces), dtype=float).reshape(-1, 2)
+
+
+def phase_exposure_fractions(events_path: Path, frequency_hz: float, epoch_s: float,
+                             edges: np.ndarray, ccd: int | None = None) -> np.ndarray:
+    """Fração do tempo bom passada em cada intervalo de fase ``edges``."""
+    intervals = good_time_intervals(events_path, ccd=ccd)
+    coverage = np.zeros(len(edges) - 1)
+    for start, stop in intervals:
+        coverage += (_cycles_in_bins(frequency_hz * (stop - epoch_s), edges)
+                     - _cycles_in_bins(frequency_hz * (start - epoch_s), edges))
+    total = coverage.sum()
+    if total <= 0.0:
+        raise ValueError("as GTIs não cobrem tempo nenhum")
+    return coverage / total
+
+
+def _cycles_in_bins(cycles: float, edges: np.ndarray) -> np.ndarray:
+    """Quanto de cada bin de fase foi percorrido de 0 até ``cycles`` ciclos."""
+    low, high = edges[:-1], edges[1:]
+    whole = np.floor(cycles)
+    partial = cycles - whole
+    return whole * (high - low) + (np.clip(partial, low, high) - low)
+
+
+def _epoch_seconds(events_path: Path, epoch_utc: str | None) -> float:
+    """A época de fase zero do ``phasecalc``, em segundos do tempo da missão.
+
+    Sem época explícita é o ``TSTART`` da lista, que é o que ``epoch_to_utc``
+    entrega ao ``phasecalc``; com ela, a mesma data convertida de volta.
+    """
+    from astropy.io import fits
+
+    with fits.open(events_path, memmap=True) as hdus:
+        header = hdus[1].header
+        start = float(header["TSTART"])
+        reference = float(header.get("MJDREF", 50814.0))
+    if not epoch_utc:
+        return start
+    from astropy.time import Time
+
+    return (Time(epoch_utc, scale="utc").tt.mjd - reference) * 86400.0
+
+
+def _scale_exposure(path: Path, fraction: float) -> float:
+    """Multiplica o EXPOSURE do espectro pela cobertura em fase e o devolve."""
+    from astropy.io import fits
+
+    with fits.open(path, mode="update") as hdus:
+        header = hdus["SPECTRUM"].header if "SPECTRUM" in hdus else hdus[1].header
+        full = float(header.get("EXPOFULL", header["EXPOSURE"]))
+        header["EXPOFULL"] = (full, "exposicao da observacao inteira (s)")
+        header["PHASEFRC"] = (fraction, "fracao do tempo bom neste intervalo de fase")
+        header["EXPOSURE"] = (full * fraction, "exposicao efetiva desta fatia de fase (s)")
+        return full * fraction

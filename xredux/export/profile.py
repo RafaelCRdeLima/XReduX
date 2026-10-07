@@ -110,7 +110,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def raw_subdirectory(target: str, obsid: str) -> str:
+def raw_subdirectory(target: str, obsid: str, identifier: str = "") -> str:
     """Onde o ARF e o RMF de UMA observação ficam, dentro do PULSARIS.
 
     **Isto era uma pasta só para todas as observações**, e o SAS nomeia os
@@ -123,9 +123,15 @@ def raw_subdirectory(target: str, obsid: str) -> str:
     O arranjo agora espelha o do próprio XREDUX, ``products/<fonte>/<obsid>/``,
     porque quem abre a pasta espera reconhecer de quem é o dado sem consultar
     índice nenhum.
+
+    E dentro da observação, uma pasta por perfil: dois perfis da mesma
+    observação (pn e MOS, ou dois modos) também copiavam para o mesmo
+    ``src.arf``, e a instalação mais recente trocava em silêncio o conteúdo para
+    o qual o manifesto do perfil anterior apontava.
     """
     compact = compact_name(target) if target else ""
-    return f"{compact}/{obsid}" if compact else obsid
+    base = f"{compact}/{obsid}" if compact else obsid
+    return f"{base}/{identifier}" if identifier else base
 
 
 def build(pulsaris_root: Path, output_dir: Path, identifier: str, label: str,
@@ -183,7 +189,7 @@ def build(pulsaris_root: Path, output_dir: Path, identifier: str, label: str,
         "redistribution": "full_sparse_ogip_rmf",
         "raw_files": [],
     }
-    raw_dir = raw_subdirectory(target, obsid or identifier)
+    raw_dir = raw_subdirectory(target, obsid or identifier, identifier)
     for path in (arf, rmf):
         if path is not None and Path(path).is_file():
             entry["raw_files"].append({

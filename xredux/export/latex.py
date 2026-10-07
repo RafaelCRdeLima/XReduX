@@ -319,8 +319,9 @@ def _region_paragraph(state) -> str:
         lines.append(text + ".")
 
     check = getattr(state, "pileup", None)
-    if check is not None and getattr(check, "doubles", None) is not None:
-        singles = getattr(check, "singles", None) or (float("nan"),) * 2
+    measured = check is not None and getattr(check, "measured", lambda: False)()
+    if measured:
+        singles = check.singles
         verdict = check.verdict()
         text = (f"Photon pile-up was assessed with \\texttt{{epatplot}}: the "
                 f"observed-to-model pattern fractions in the 0.5--2.0\\,keV band are "
@@ -331,10 +332,11 @@ def _region_paragraph(state) -> str:
                      "point-spread function core, as expected for pile-up")
         elif verdict == "unexplained":
             core, wings = check.core, check.wings
-            text += (f". The excess of double events is the same within the core "
-                     f"(${core.doubles[0]:.3f}\\pm{core.doubles[1]:.3f}$) and in the "
+            text += (f". The double-event ratio is consistent between the core "
+                     f"(${core.doubles[0]:.3f}\\pm{core.doubles[1]:.3f}$) and the "
                      f"wings (${wings.doubles[0]:.3f}\\pm{wings.doubles[1]:.3f}$) of "
-                     f"the point-spread function, which excludes pile-up as its origin")
+                     f"the point-spread function, so there is no evidence that the "
+                     f"deviation grows with surface brightness, as pile-up would")
         elif verdict == "clean":
             text += ", consistent with no pile-up"
         lines.append(text + ".")
@@ -347,10 +349,26 @@ def _join(items: list[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
+def _done(session, step: str) -> bool:
+    """Etapa concluída — ou sessão do formato antigo, que não registrava tanto."""
+    if session is None:
+        return False
+    return session.is_done(step) or getattr(session, "schema", 2) < 2
+
+
+def _band_text(band) -> str:
+    return f"{band[0] / 1000.0:.2f}--{band[1] / 1000.0:.1f}\\,keV"
+
+
 def _timing_paragraph(state, session) -> str:
-    """Correção baricêntrica, busca de período e o que se mediu."""
+    """Correção baricêntrica, busca de período e o que se mediu.
+
+    Cada frase sai do registro da etapa que a sustenta, não da existência de um
+    valor no estado: ter um período não diz se ele foi buscado, dobrado ou
+    refinado, nem em que banda.
+    """
     lines = []
-    if getattr(state, "barycentered", None) is not None:
+    if getattr(state, "barycentered", None) is not None and _done(session, "timing"):
         position = ""
         if state.ra is not None and state.dec is not None:
             # ^{\circ} em vez de \degr: aquele é macro de classe de
@@ -364,54 +382,91 @@ def _timing_paragraph(state, session) -> str:
             f"JPL DE405 ephemeris{position}.")
 
     curve = getattr(state, "light_curve", None)
-    if curve is not None:
+    record = session.steps.get("lightcurve") if session is not None else None
+    if curve is not None and (record is not None and record.status == "done"
+                              or _done(session, "lightcurve") and record is None):
+        parameters = record.parameters if record is not None else {}
+        corrected = getattr(state, "corrected_light_curve", None) is not None
+        subtracted = parameters.get("background_subtracted", corrected)
+        text = "A light curve of the source region was extracted with \\texttt{evselect}"
         band = getattr(curve, "band_ev", None)
-        text = "A background-subtracted light curve was extracted with "
-        text += r"\texttt{evselect} and corrected with \texttt{epiclccorr}" \
-            if getattr(state, "corrected_light_curve", None) is not None \
-            else r"\texttt{evselect}"
         if band:
-            text += (f", in the {band[0] / 1000.0:.2f}--{band[1] / 1000.0:.1f}\\,keV "
-                     f"band and binned at {curve.binsize_s:g}\\,s")
+            text += f" in the {_band_text(band)} band, binned at {curve.binsize_s:g}\\,s"
+        if corrected and subtracted:
+            text += (", and corrected with \\texttt{epiclccorr} for exposure, "
+                     "vignetting and point-spread-function losses, with the background "
+                     "measured in the background region subtracted")
+        elif corrected:
+            text += ", and corrected with \\texttt{epiclccorr}"
         lines.append(text + ".")
 
-    if getattr(state, "candidates", None):
+    search = session.steps.get("period_search") if session is not None else None
+    legacy = session is not None and getattr(session, "schema", 2) < 2
+    valid = search is not None and (search.status == "done" or legacy)
+    parameters = search.parameters if valid else {}
+    methods = list(parameters.get("methods") or [])
+    if legacy and not methods and getattr(state, "period_s", None):
+        # Sessões antigas não registravam o método; nada se afirma sobre ele.
+        methods = ["unrecorded"]
+
+    if "blind_search" in methods:
+        band = parameters.get("blind_band_ev")
         lines.append(
             r"A blind period search was carried out on the power spectrum computed "
-            r"with \texttt{powspec}. Because a double-peaked profile places the "
-            r"strongest Fourier power in the second harmonic, candidate frequencies "
-            r"and their subharmonics were tested for power in the fundamental "
-            r"component ($Z^2_1$) measured against the local noise level, and the "
-            r"true fundamental identified as the longest period retaining it.")
+            r"with \texttt{powspec}"
+            + (f" in the {_band_text(band)} band" if band else "")
+            + r". Because a double-peaked profile places the strongest Fourier power "
+            r"in the second harmonic, the strongest peaks and their subharmonics were "
+            r"tested on the unbinned arrival times for power in the fundamental "
+            r"($Z^2_1 \geq 13.8$ and at least ten times its median in the "
+            r"surrounding frequencies); candidates were ranked by that contrast, and a "
+            r"candidate was replaced by half or one third of its frequency when "
+            r"those also retained fundamental power.")
 
-    if getattr(state, "period_s", None):
-        text = (f"The periodicity was then refined by epoch folding with "
-                f"\\texttt{{efsearch}} and, on the unbinned arrival times, with the "
-                f"$Z^2_n$ statistic \\citep{{buccheri1983}}, giving "
-                f"$P = {state.period_s:.6f}$\\,s")
+    period = getattr(state, "period_s", None)
+    if period and ("efsearch" in methods or "z2_refine" in methods):
+        steps = []
+        if "efsearch" in methods:
+            steps.append(r"epoch folding of the light curve with \texttt{efsearch}")
+        if "z2_refine" in methods:
+            harmonics = parameters.get("refine_harmonics")
+            band = parameters.get("refine_band_ev")
+            text = (f"the $Z^2_{{{harmonics}}}$ statistic" if harmonics
+                    else "the $Z^2_n$ statistic")
+            text += r" on the unbinned arrival times \citep{buccheri1983}"
+            if band:
+                text += f" in the {_band_text(band)} band"
+            steps.append(text)
+        text = "The period was determined by " + _join(steps)
+        text += f", giving $P = {period:.6f}$\\,s"
         h = getattr(state, "h_statistic", None)
-        if h is not None:
+        if h is not None and "z2_refine" in methods:
             from ..tasks import timing
 
             probability = timing.h_test_probability(h)
-            text += (f". The $H$-test \\citep{{dejager1989}} gives $H = {h:.1f}$ with "
-                     f"{state.h_harmonics} significant harmonic"
+            text += (f". The $H$-test \\citep{{dejager1989}} at this period gives "
+                     f"$H = {h:.1f}$ with {state.h_harmonics} harmonic"
                      f"{'s' if (state.h_harmonics or 1) > 1 else ''} "
-                     f"($p \\approx {_scientific(probability)}$)")
+                     f"(single-trial probability $p \\approx {_scientific(probability)}$, "
+                     f"not corrected for the number of trial frequencies)")
         lines.append(text + ".")
 
     fraction = getattr(state, "pulsed_fraction", None)
     rms = getattr(state, "pulsed_fraction_rms", None)
-    if fraction:
-        text = (f"The pulsed fraction of the fundamental is "
+    if fraction and "z2_refine" in methods:
+        count = getattr(state, "event_count", None)
+        text = (f"The pulsed fraction of the fundamental, estimated from $Z^2_1$ with "
+                f"the mean noise power subtracted, is "
                 f"$({100 * fraction[0]:.2f} \\pm {100 * fraction[1]:.2f})\\%$")
+        if count:
+            text += f" for {count} events"
         if rms and (state.h_harmonics or 1) > 1:
-            text += (f", and the root-mean-square pulsed fraction over the "
-                     f"{state.h_harmonics} significant harmonics is "
+            text += (f", and the root-mean-square pulsed fraction over "
+                     f"{state.h_harmonics} harmonics is "
                      f"$({100 * rms[0]:.2f} \\pm {100 * rms[1]:.2f})\\%$")
         lines.append(text + ".")
 
-    if getattr(state, "pulse_profile", None) is not None:
+    if getattr(state, "pulse_profile", None) is not None and methods:
         lines.append(
             r"Pulse profiles were built by assigning a rotational phase to each "
             r"event with the \textsc{sas} task \texttt{phasecalc}, so that no "
@@ -420,20 +475,30 @@ def _timing_paragraph(state, session) -> str:
 
 
 def _spectra_paragraph(state, session) -> str:
-    """Extração espectral e respostas específicas da observação."""
+    """Extração espectral e respostas específicas da observação.
+
+    Só cita o que existe: fundo, RMF, ARF e agrupamento são verificados um a um.
+    """
     spectrum = getattr(state, "source_spectrum", None)
-    if spectrum is None:
+    if spectrum is None or not _done(session, "spectra"):
         return ""
-    lines = [r"Source and background spectra were extracted with "
-             r"\texttt{evselect}, the extraction areas were computed with "
-             r"\texttt{backscale}, and redistribution matrices and ancillary "
-             r"response files were generated for this observation with "
-             r"\texttt{rmfgen} and \texttt{arfgen}."]
+    has_background = getattr(spectrum, "background", None) is not None
+    lines = [("Source and background spectra were" if has_background
+              else "A source spectrum was")
+             + r" extracted with \texttt{evselect}, and the extraction areas were "
+               r"computed with \texttt{backscale}."]
+    responses = []
+    if getattr(spectrum, "rmf", None) is not None:
+        responses.append(r"a redistribution matrix with \texttt{rmfgen}")
+    if getattr(spectrum, "arf", None) is not None:
+        responses.append(r"an ancillary response file with \texttt{arfgen}, for the "
+                         r"source position and extraction region")
+    if responses:
+        lines.append("For this observation we generated " + _join(responses) + ".")
     record = session.steps.get("spectra")
     minimum = (record.parameters if record else {}).get("group_min_counts")
-    if minimum:
-        lines.append(f"The spectra were grouped to a minimum of {minimum} counts per "
-                     f"bin so that the $\\chi^2$ statistic applies.")
+    if minimum and getattr(spectrum, "grouped", None) is not None:
+        lines.append(f"The spectra were grouped to a minimum of {minimum} counts per bin.")
     if getattr(spectrum, "total_counts", None) and getattr(spectrum, "exposure_s", None):
         lines.append(
             f"The source spectrum contains {spectrum.total_counts:.0f} counts over "

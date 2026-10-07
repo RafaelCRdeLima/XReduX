@@ -317,8 +317,8 @@ class SessionRestoreTest(unittest.TestCase):
 
     def test_period_survives_a_reopen(self) -> None:
         first = self.pipeline()
-        first.session.step("timing").parameters["period_s"] = 10.312538
-        first.session.save()
+        first.state.period_s = 10.312538
+        first._remember_timing("efsearch")
 
         second = self.pipeline()
         second.restore()
@@ -514,7 +514,7 @@ class TimingPersistenceTest(unittest.TestCase):
             pipeline.state.h_harmonics = 2
             pipeline.state.pulsed_fraction = (0.012, 0.003)
             pipeline.state.search_confirmed = True
-            pipeline._remember_timing()
+            pipeline._remember_timing("z2_refine")
 
             # Refazer a correção baricêntrica reinicia o passo "timing".
             pipeline.session.begin("timing", {"ra": 284.1, "dec": -37.9})
@@ -531,6 +531,9 @@ class TimingPersistenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             pipeline = self._pipeline(work)
+            # Uma sessão do formato antigo (esquema 1), em que o período ficava
+            # nos parâmetros da etapa "timing".
+            pipeline.session.schema = 1
             pipeline.session.step("timing").parameters["period_s"] = 10.31
             pipeline.session.save()
 
@@ -540,11 +543,11 @@ class TimingPersistenceTest(unittest.TestCase):
 
 
 class CalibrationRestoreTest(unittest.TestCase):
-    """Os produtos no disco valem mais que o registro da sessão.
+    """A calibração só volta se a etapa concluiu e os produtos são íntegros.
 
-    Uma etapa marcada como falha não registra saída nenhuma. A calibração era a
-    única peça que dependia desse registro, então a página reabria vazia com o
-    ccf.cif e o SUM.SAS ali do lado.
+    Antes, uma calibração que falhou era promovida a concluída sempre que o
+    ccf.cif e o SUM.SAS existissem — inclusive vazios ou truncados por uma
+    escrita interrompida (auditoria, XR-03).
     """
 
     SUMMARY = ("RBS1223 / target name\n"
@@ -561,13 +564,20 @@ class CalibrationRestoreTest(unittest.TestCase):
                               work_dir=work)
         return Pipeline(Settings(), session, context)
 
-    def test_failed_calibration_recovers_from_the_products_on_disk(self) -> None:
+    def _write_products(self, work: Path) -> None:
+        from astropy.io import fits
+
+        (work / "odf").mkdir()
+        index = fits.BinTableHDU.from_columns(
+            [fits.Column(name="SCOPE", format="8A", array=["EPN"])], name="CALINDEX")
+        fits.HDUList([fits.PrimaryHDU(), index]).writeto(work / "ccf.cif")
+        (work / "3666_0844140101_SCX00000SUM.SAS").write_text(
+            f"PATH {work / 'odf'}\nOBSERVATION\n" + self.SUMMARY, encoding="latin-1")
+
+    def test_failed_calibration_is_not_promoted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
-            (work / "odf").mkdir()
-            (work / "ccf.cif").write_text("", encoding="utf-8")
-            (work / "3666_0844140101_SCX00000SUM.SAS").write_text(
-                self.SUMMARY, encoding="latin-1")
+            self._write_products(work)
 
             pipeline = self._pipeline(work)
             pipeline.session.begin("calibration")
@@ -576,15 +586,39 @@ class CalibrationRestoreTest(unittest.TestCase):
             reopened = self._pipeline(work)
             restored = reopened.restore()
 
+            self.assertNotIn("calibração", restored)
+            self.assertIsNone(reopened.state.ccf_cif)
+            self.assertEqual(reopened.session.steps["calibration"].status, "failed")
+
+    def test_concluded_calibration_is_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            self._write_products(work)
+            pipeline = self._pipeline(work)
+            pipeline.session.begin("calibration")
+            pipeline.session.finish("calibration")
+
+            reopened = self._pipeline(work)
+            restored = reopened.restore()
+
             self.assertIn("calibração", restored)
             self.assertEqual(reopened.state.ccf_cif, work / "ccf.cif")
-            self.assertEqual(reopened.state.sum_sas,
-                             work / "3666_0844140101_SCX00000SUM.SAS")
             self.assertEqual(reopened.state.setup.target, "RBS1223")
             # A ascensão reta do sumário vem em horas.
             self.assertAlmostEqual(reopened.state.ra, 197.2029165, places=5)
-            # E a etapa deixa de mostrar falha ao lado de uma página cheia.
-            self.assertTrue(reopened.session.is_done("calibration"))
+
+    def test_truncated_index_is_rejected_even_when_concluded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            self._write_products(work)
+            (work / "ccf.cif").write_text("", encoding="utf-8")
+            pipeline = self._pipeline(work)
+            pipeline.session.begin("calibration")
+            pipeline.session.finish("calibration")
+
+            reopened = self._pipeline(work)
+            reopened.restore()
+            self.assertIsNone(reopened.state.ccf_cif)
 
     def test_absent_products_leave_the_failure_standing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

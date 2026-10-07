@@ -14,6 +14,7 @@ observação dispara dezenas de tarefas.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -133,12 +134,14 @@ def build(settings: Settings, refresh: bool = False) -> SasEnvironment:
         return _CACHE[key]
 
     perl = "/usr/bin/perl" if Path("/usr/bin/perl").exists() else "perl"
+    # shlex.quote, e não aspas duplas: dentro delas o bash ainda expande $,
+    # crases e barras, e um caminho com esses caracteres viraria comando.
     script = "\n".join([
-        f'export HEADAS="{headas}"',
+        f"export HEADAS={shlex.quote(str(headas))}",
         'source "$HEADAS/headas-init.sh" > /dev/null',
-        f'export SAS_DIR="{sas_dir}"',
-        f'export SAS_PERL="{perl}"',
-        f'export SAS_CCFPATH="{ccf_path}"',
+        f"export SAS_DIR={shlex.quote(str(sas_dir))}",
+        f"export SAS_PERL={shlex.quote(perl)}",
+        f"export SAS_CCFPATH={shlex.quote(str(ccf_path))}",
         'source "$SAS_DIR/setsas.sh" > /dev/null',
     ])
     environment = _capture_shell_env(script)

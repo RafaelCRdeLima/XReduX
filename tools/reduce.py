@@ -105,7 +105,7 @@ def _reuse_processing(pipeline: Pipeline, session: Session,
     if not events:
         return []
     pipeline.state.event_lists = events
-    pipeline.state.selected = _prefer_fast_pn(events)
+    pipeline.select_events(_prefer_fast_pn(events))
     return events
 
 
@@ -140,6 +140,10 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
     identifier = profile_export.identifier_for(state.obsid, events.instrument,
                                                events.submode or events.mode)
     rmf = state.source_spectrum.rmf if state.source_spectrum else None
+    if rmf is None:
+        warn("sem RMF: o CSV declara canais da resposta, e o perfil e a tabela de "
+             "fundo também a exigem; rode a etapa de espectros antes de exportar")
+        return
 
     report_csv = pulsaris_export.write(
         source, output_dir / f"{identifier}_events.csv",
@@ -149,16 +153,17 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
         band_ev=tuple(arguments.band), rmf=rmf,
         region=state.source_region.description if state.source_region else "",
         extra=extra, max_events=pulsaris_export.max_events_for_upload())
+    pipeline.session.record_action(
+        "export", f"CSV {report_csv.path.name} escrito pelo XreduX: "
+                  f"{report_csv.events_written} de {report_csv.events_available} eventos"
+                  + (f", decimado com semente {report_csv.decimation_seed}"
+                     if report_csv.decimated else ""))
+    pipeline.session.save()
     report(f"CSV: {report_csv.path.name} · {report_csv.events_written} de "
            f"{report_csv.events_available} eventos · "
            f"{report_csv.size_bytes / 1e6:.1f} MB")
     for message in report_csv.warnings:
         warn(message)
-
-    if rmf is None:
-        warn("sem RMF: o perfil de instrumento e a tabela de fundo exigem a "
-             "etapa de espectros")
-        return
 
     # Tabela de fundo escalada pelo BACKSCAL, para o ajuste não creditar à
     # estrela as contagens que são do céu e do detector.

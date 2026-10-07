@@ -47,8 +47,15 @@ class ExportReport:
         return self.size_bytes <= MAX_UPLOAD_BYTES
 
 
-def _channel_from_ebounds(energy_kev: np.ndarray, rmf: Path) -> np.ndarray:
-    """Índice de canal de cada energia, segundo a ``EBOUNDS`` da RMF."""
+def _channel_from_ebounds(energy_kev: np.ndarray, rmf: Path
+                          ) -> tuple[np.ndarray, np.ndarray]:
+    """Canal de cada energia segundo a ``EBOUNDS`` da RMF, e quais caem na grade.
+
+    Um evento só recebe canal se a energia estiver em ``[E_MIN, E_MAX)`` de
+    algum canal. Antes, energias abaixo do primeiro canal, acima do último ou
+    numa lacuna da grade eram empurradas para o canal vizinho, e o ajuste
+    recebia um canal que a resposta não associa àquela energia.
+    """
     from ..tasks.spectra import channel_energies
 
     channel, low, high = channel_energies(rmf)
@@ -56,16 +63,28 @@ def _channel_from_ebounds(energy_kev: np.ndarray, rmf: Path) -> np.ndarray:
     channel, low, high = channel[order], low[order], high[order]
 
     index = np.searchsorted(low, energy_kev, side="right") - 1
-    index = np.clip(index, 0, channel.size - 1)
-    # Energias acima do último limite superior ficam no canal mais alto.
-    return channel[index]
+    safe = np.clip(index, 0, channel.size - 1)
+    inside = (index >= 0) & (energy_kev < high[safe])
+    return channel[safe], inside
 
 
 def read_events(events_path: Path, band_ev: tuple[int, int] | None = None,
                 rmf: Path | None = None,
                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Lê tempo, canal e energia dos eventos, junto com o cabeçalho relevante."""
+    """Lê tempo, canal e energia dos eventos, junto com o cabeçalho relevante.
+
+    Exige a RMF: o ``PI`` que o PULSARIS espera é o índice de canal da resposta
+    que acompanha o dado, e sem ela não há canal a declarar — a antiga reserva
+    ``PI/5`` inventava uma grade de 5 eV, errada até para o MOS (15 eV).
+    Eventos fora da grade da RMF ficam de fora; quantos, vai em
+    ``header["XREDUX_OUTSIDE_GRID"]``, e quantos havia antes do corte de banda,
+    em ``header["XREDUX_ALL_EVENTS"]``.
+    """
     from astropy.io import fits
+
+    if rmf is None or not Path(rmf).exists():
+        raise ValueError("a exportação de eventos exige a RMF da observação: é a "
+                         "grade de canais dela que o CSV declara; gere os espectros antes")
 
     with fits.open(events_path, memmap=True) as hdus:
         hdu = hdus["EVENTS"]
@@ -73,6 +92,8 @@ def read_events(events_path: Path, band_ev: tuple[int, int] | None = None,
         data = hdu.data
         time = np.asarray(data["TIME"], dtype=float)
         pi_ev = np.asarray(data["PI"], dtype=float)
+    header["XREDUX_ALL_EVENTS"] = int(time.size)
+    header["XREDUX_FIRST_TIME"] = float(time.min()) if time.size else 0.0
 
     if band_ev is not None:
         low, high = band_ev
@@ -83,11 +104,9 @@ def read_events(events_path: Path, band_ev: tuple[int, int] | None = None,
     time, pi_ev = time[order], pi_ev[order]
 
     energy_kev = pi_ev / 1000.0
-    if rmf is not None and rmf.exists():
-        channel = _channel_from_ebounds(energy_kev, rmf)
-    else:
-        channel = np.rint(pi_ev / 5.0).astype(int)
-    return time, channel, energy_kev, header
+    channel, inside = _channel_from_ebounds(energy_kev, Path(rmf))
+    header["XREDUX_OUTSIDE_GRID"] = int((~inside).sum())
+    return time[inside], channel[inside], energy_kev[inside], header
 
 
 def write(events_path: Path, output: Path, *, instrument: str,
@@ -99,42 +118,69 @@ def write(events_path: Path, output: Path, *, instrument: str,
           max_events: int | None = None, seed: int = 1234) -> ExportReport:
     """Escreve o CSV de eventos para o PULSARIS.
 
-    Os tempos são deslocados para começar em zero, como nos arquivos sintéticos
-    do PULSARIS; ``phase_reference_s`` continua se referindo a essa mesma origem,
-    de modo que a fase absoluta não se perde.
+    Origem dos tempos: o ``TSTART`` da lista (ou, sem ele, o primeiro evento
+    da lista inteira), fixado antes do corte de banda e de qualquer decimação.
+    Antes era o primeiro evento já filtrado e decimado, e mudar a banda ou a
+    semente deslocava a origem — e com ela a fase absoluta. ``phase_reference_s``
+    se refere a essa origem, que vai explícita no cabeçalho com o sistema de
+    tempo (``time_origin_s``, ``timesys``, ``mjdref``).
+
+    Decimação: quando a lista excede ``max_events``, cada evento é mantido com
+    probabilidade ``p``, independentemente dos demais (desbaste de Bernoulli).
+    Um processo de Poisson desbastado assim continua de Poisson com taxa
+    ``p·λ`` — então o modelo continua certo se a exposição for ``p·T``, e é
+    isso que vai em ``exposure_s``, para a fonte e para o fundo, que o ajuste
+    multiplica pela mesma exposição. N, p, semente e tempo vivo integral vão
+    ao cabeçalho: o arquivo diz sozinho que é uma amostra.
     """
     time, channel, energy_kev, header = read_events(events_path, band_ev=band_ev, rmf=rmf)
     available = int(time.size)
     warnings: list[str] = []
+    outside = int(header.get("XREDUX_OUTSIDE_GRID", 0))
+    if outside:
+        warnings.append(f"{outside} evento(s) com energia fora da grade de canais da RMF "
+                        "ficaram de fora do CSV")
 
     if available == 0:
         raise ValueError("nenhum evento sobrou após os filtros; verifique região e banda")
 
-    decimated = False
-    if max_events is not None and available > max_events:
-        generator = np.random.default_rng(seed)
-        keep = np.sort(generator.choice(available, size=max_events, replace=False))
-        time, channel, energy_kev = time[keep], channel[keep], energy_kev[keep]
-        decimated = True
-        warnings.append(
-            f"lista decimada de {available} para {max_events} eventos (semente {seed}); "
-            "a estatística por bin de fase-energia cai na mesma proporção"
-        )
-
-    origin = float(time[0])
-    elapsed = time - origin
+    origin = _time_origin(header)
+    live = _live_time(header)
     if exposure_s is None:
-        # O intervalo entre o primeiro e o último evento superestima a exposição
-        # sempre que há lacunas de GTI; o tempo vivo do cabeçalho é o valor certo,
-        # e é dele que o PULSARIS tira a normalização.
-        exposure_s = _live_time(header)
+        exposure_s = live
         if exposure_s is None:
-            exposure_s = float(elapsed[-1] - elapsed[0]) if elapsed.size > 1 else 0.0
+            exposure_s = float(time[-1] - time[0]) if time.size > 1 else 0.0
             warnings.append(
                 "exposição estimada pelo intervalo dos eventos: o cabeçalho não "
                 "traz LIVETIME nem EXPOSURE, e lacunas de GTI a superestimam"
             )
+    full_exposure = exposure_s
 
+    decimated = False
+    probability = 1.0
+    if max_events is not None and available > max_events:
+        # Alvo t tal que t + z·√t = K, com z = 5: a amostra (Poisson de média t)
+        # cabe no limite K com probabilidade de ~1 − 3×10⁻⁷, sem cortar depois
+        # — o que quebraria a independência entre eventos. Para o orçamento
+        # real (~2×10⁶ eventos) a folga é de ~0,35%.
+        z = 5.0
+        root = (-z + np.sqrt(z * z + 4.0 * max_events)) / 2.0
+        target = max(1.0, root * root)
+        probability = min(1.0, target / available)
+        generator = np.random.default_rng(seed)
+        keep = generator.random(available) < probability
+        time, channel, energy_kev = time[keep], channel[keep], energy_kev[keep]
+        decimated = True
+        exposure_s = full_exposure * probability
+        warnings.append(
+            f"lista decimada de {available} para {int(keep.sum())} eventos por desbaste "
+            f"de Bernoulli (p = {probability:.6g}, semente {seed}); a exposição declarada "
+            f"é a efetiva, p × tempo vivo = {exposure_s:.1f} s"
+        )
+        if keep.sum() > max_events:
+            warnings.append("a amostra excedeu o limite por flutuação; repita com outra semente")
+
+    elapsed = time - origin
     metadata: dict[str, object] = {
         "instrument": instrument,
         "folded_in_phase": "false",
@@ -146,10 +192,26 @@ def write(events_path: Path, output: Path, *, instrument: str,
         "obsid": obsid,
         "target": target,
         "detected_events": len(time),
+        # Nome mantido por compatibilidade: é tempo da missão em segundos, não MJD.
         "time_origin_mjd_s": f"{origin:.6f}",
+        "time_origin_s": f"{origin:.6f}",
+        "time_origin_from": "TSTART" if header.get("TSTART") is not None else "first_event",
+        "timesys": str(header.get("TIMESYS", "")).strip() or "unknown",
+        "mjdref": f"{_mjdref(header):.10g}",
         "barycentric": str(header.get("TIMEREF", "")).strip().upper() or "unknown",
         "produced_by": "XREDUX",
     }
+    if decimated:
+        metadata.update({
+            "decimated": "true",
+            "decimation_method": "bernoulli",
+            "decimation_probability": f"{probability:.9g}",
+            "decimation_seed": seed,
+            "events_before_decimation": available,
+            "livetime_full_s": f"{full_exposure:.6f}",
+        })
+    if outside:
+        metadata["events_outside_response_grid"] = outside
     if period_s:
         metadata["period_s"] = f"{period_s:.12g}"
     if band_ev:
@@ -158,7 +220,7 @@ def write(events_path: Path, output: Path, *, instrument: str,
     if region:
         metadata["region"] = region
     if rmf is not None:
-        metadata["response_rmf"] = rmf.name
+        metadata["response_rmf"] = Path(rmf).name
     metadata.update(extra or {})
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +242,26 @@ def write(events_path: Path, output: Path, *, instrument: str,
     return ExportReport(path=output, events_written=len(time), events_available=available,
                         size_bytes=size, decimated=decimated,
                         decimation_seed=seed if decimated else None, warnings=warnings)
+
+
+def _time_origin(header: dict) -> float:
+    """Origem dos tempos exportados, independente da banda e da decimação."""
+    start = header.get("TSTART")
+    try:
+        if start is not None:
+            return float(start)
+    except (TypeError, ValueError):
+        pass
+    return float(header.get("XREDUX_FIRST_TIME", 0.0))
+
+
+def _mjdref(header: dict) -> float:
+    """MJD de referência do tempo da missão (MJDREF, ou MJDREFI + MJDREFF)."""
+    if header.get("MJDREF") is not None:
+        return float(header["MJDREF"])
+    if header.get("MJDREFI") is not None:
+        return float(header["MJDREFI"]) + float(header.get("MJDREFF", 0.0))
+    return 50814.0
 
 
 def _live_time(header: dict) -> float | None:

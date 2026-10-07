@@ -293,7 +293,8 @@ class RegionsPage(Page):
             linhas.append(t("regions.pileup_fractions",
                             s=f"{check.singles[0]:.3f}", se=f"{check.singles[1]:.3f}",
                             d=f"{check.doubles[0]:.3f}", de=f"{check.doubles[1]:.3f}"))
-        if check.core is not None and check.wings is not None:
+        if (check.core is not None and check.wings is not None
+                and check.core.doubles is not None and check.wings.doubles is not None):
             linhas.append(t("regions.pileup_parts",
                             core=f"{check.core.doubles[0]:.3f}",
                             core_error=f"{check.core.doubles[1]:.3f}",
@@ -305,6 +306,8 @@ class RegionsPage(Page):
                         photons=f"{check.photons_per_frame():.3f}",
                         frame=f"{check.frame_time_s * 1000:.1f}",
                         gradient=f"{gradient:+.1f}" if gradient is not None else "—"))
+        if check.raw_tail:
+            linhas.append(check.raw_tail)
         self._summary.setText("\n".join(linhas))
         self.set_status(t("status.done"), "done")
 

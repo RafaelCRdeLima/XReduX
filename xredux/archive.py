@@ -25,6 +25,10 @@ from pathlib import Path
 #: bastante para absorver a diferença entre a posição de catálogo e o
 #: apontamento do satélite, apertado o bastante para não fundir vizinhas.
 MATCH_RADIUS_ARCMIN = 3.0
+#: Até aqui a posição decide sozinha. Entre este raio e o de cima, duas
+#: posições só são a mesma fonte se o nome (ou um apelido) também coincidir:
+#: proximidade sozinha fundia objetos vizinhos distintos, sem aviso.
+SAME_POSITION_ARCMIN = 1.0
 
 DESCRIPTOR = "source.json"
 _OBSID = re.compile(r"^\d{10}$")
@@ -119,14 +123,25 @@ class Source:
 
     def matches(self, name: str | None = None, ra: float | None = None,
                 dec: float | None = None) -> bool:
-        """Diz se esta fonte é a mesma, por posição de preferência."""
+        """Diz se esta fonte é a mesma, por posição de preferência.
+
+        Dentro de ``SAME_POSITION_ARCMIN`` a posição basta (nomes diferentes da
+        mesma fonte, como RBS 1223 e RX J1308.6+2127, caem aqui). Até
+        ``MATCH_RADIUS_ARCMIN`` só com o nome também coincidindo; além disso,
+        nunca. Sem posição, decide o nome.
+        """
+        same_name = bool(name) and self._known_as(name)
         if (ra is not None and dec is not None
                 and self.ra is not None and self.dec is not None):
-            return separation_arcmin(ra, dec, self.ra, self.dec) <= MATCH_RADIUS_ARCMIN
-        if name:
-            wanted = _key(name)
-            return wanted == _key(self.name) or wanted in {_key(a) for a in self.aliases}
-        return False
+            distance = separation_arcmin(ra, dec, self.ra, self.dec)
+            if distance <= SAME_POSITION_ARCMIN:
+                return True
+            return distance <= MATCH_RADIUS_ARCMIN and same_name
+        return same_name
+
+    def _known_as(self, name: str) -> bool:
+        wanted = _key(name)
+        return wanted == _key(self.name) or wanted in {_key(a) for a in self.aliases}
 
     def remember(self, name: str | None, ra: float | None, dec: float | None) -> None:
         """Registra um apelido novo e completa as coordenadas se faltavam."""
@@ -206,11 +221,25 @@ class Archive:
                 existing.remember(name, ra, dec)
             return existing
         label = sanitise_name(name or "fonte-sem-nome")
-        source = Source(directory=self.root / compact_name(label), name=label,
+        source = Source(directory=self._free_directory(compact_name(label)), name=label,
                         ra=ra, dec=dec)
         if create:
             source.save()
         return source
+
+    def _free_directory(self, slug: str) -> Path:
+        """Pasta para uma fonte nova, sem tomar a de outra fonte.
+
+        Nomes distintos podem dar o mesmo nome compacto ("A B" e "AB"); antes o
+        descritor da segunda sobrescrevia o da primeira, e as observações das
+        duas passavam a morar juntas. Uma pasta já ocupada recebe sufixo.
+        """
+        candidate = self.root / slug
+        suffix = 2
+        while candidate.exists():
+            candidate = self.root / f"{slug}_{suffix}"
+            suffix += 1
+        return candidate
 
     def observation_dir(self, obsid: str, name: str | None = None,
                         ra: float | None = None, dec: float | None = None) -> Path:

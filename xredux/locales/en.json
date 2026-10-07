@@ -130,11 +130,11 @@
   "regions.outer": "Outer annulus",
   "regions.pileup_clean": "No sign of pile-up. Rate {rate} ct/s, {photons} photons per {frame} ms frame.",
   "regions.pileup_fractions": "Observed-to-model ratios in 0.5–2 keV — singles {s} ± {se}, doubles {d} ± {de}. With no pile-up both are 1.",
-  "regions.pileup_inconclusive": "There is an excess of doubles, but core and wings could not be separated to decide (the region is not a circle). Rate {rate} ct/s, {photons} photons per {frame} ms frame.",
+  "regions.pileup_inconclusive": "There is a significant deviation in the pattern fractions, but core and wings could not be separated to decide (the region is not a circle or its geometry was not preserved). Rate {rate} ct/s, {photons} photons per {frame} ms frame.",
   "regions.pileup_parts": "Splitting the region: core {core} ± {core_error}, wings {wings} ± {wings_error}. Pile-up grows with surface brightness, so it would concentrate in the core.",
   "regions.pileup_pileup": "PILE-UP: the excess of doubles is larger in the core than in the wings ({gradient}σ), which is how pile-up behaves. Extract from an annulus excluding the core and redo the reduction.",
   "regions.pileup_ready": "Pile-up diagnostic: {path}",
-  "regions.pileup_unexplained": "NOT pile-up. The excess of doubles is real but equal in the core and in the wings ({gradient}σ apart) — pile-up would concentrate in the core. On a very soft source this is expected: epatplot's model assumes a harder spectrum, and near the energy threshold charge splits between neighbouring pixels with no coincidence at all. You can go on with the circle.",
+  "regions.pileup_unexplained": "No evidence of pile-up. The deviation in the pattern fractions is real but does not grow from the annulus to the core ({gradient}σ apart), as pile-up would. This does not identify the cause; on a very soft source it is common: epatplot's model assumes a harder spectrum, and near the energy threshold charge splits between neighbouring pixels with no coincidence at all.",
   "regions.radius": "Radius",
   "regions.sky_geometry": "Sky-plane geometry",
   "regions.source": "Source",
@@ -230,5 +230,7 @@
   "window.script": "Reproducible script",
   "window.script_written": "Script written to:\n{path}",
   "window.session": "Session {obsid} · {path}",
-  "window.title": "XREDUX — XMM-Newton pulsar reduction"
+  "window.title": "XREDUX — XMM-Newton pulsar reduction",
+  "regions.pileup_unmeasured": "NOT MEASURED: epatplot returned no usable single and double ratios, so pile-up was NOT assessed. Check the task output in the console. Rate {rate} ct/s, {photons} photons per {frame} ms frame.",
+  "status.busy_elsewhere": "Another step ({step}) is running; wait for it or cancel it first."
 }

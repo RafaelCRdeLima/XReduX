@@ -130,11 +130,11 @@
   "regions.outer": "Anel externo",
   "regions.pileup_clean": "Sem sinal de empilhamento. Taxa {rate} ct/s, {photons} fótons por quadro de {frame} ms.",
   "regions.pileup_fractions": "Razões observado/modelo em 0,5–2 keV — simples {s} ± {se}, duplos {d} ± {de}. Sem empilhamento, ambas valem 1.",
-  "regions.pileup_inconclusive": "Há sobra de duplos, mas não foi possível separar núcleo e asas para decidir (a região não é um círculo). Taxa {rate} ct/s, {photons} fótons por quadro de {frame} ms.",
+  "regions.pileup_inconclusive": "Há desvio significativo nas frações de padrões, mas não foi possível separar núcleo e asas para decidir (a região não é um círculo ou a geometria não foi preservada). Taxa {rate} ct/s, {photons} fótons por quadro de {frame} ms.",
   "regions.pileup_parts": "Separando a região: núcleo {core} ± {core_error}, asas {wings} ± {wings_error}. O empilhamento cresce com o brilho superficial, então se concentraria no núcleo.",
   "regions.pileup_pileup": "EMPILHAMENTO: a sobra de duplos é maior no núcleo que nas asas ({gradient}σ), que é como o empilhamento se comporta. Extraia num anel, excluindo o núcleo, e refaça a redução.",
   "regions.pileup_ready": "Diagrama de empilhamento: {path}",
-  "regions.pileup_unexplained": "NÃO é empilhamento. A sobra de duplos é real, mas igual no núcleo e nas asas ({gradient}σ de diferença) — empilhamento se concentraria no núcleo. Em fonte muito mole isso é esperado: o modelo do epatplot supõe espectro mais duro, e perto do limiar de energia a carga se divide entre pixels vizinhos sem coincidência nenhuma. Pode seguir com o círculo.",
+  "regions.pileup_unexplained": "Sem evidência de empilhamento. O desvio nas frações de padrões é real, mas não cresce do anel para o núcleo ({gradient}σ de diferença), como o empilhamento faria. Isso não identifica a causa; em fonte muito mole é comum: o modelo do epatplot supõe espectro mais duro, e perto do limiar de energia a carga se divide entre pixels vizinhos sem coincidência nenhuma.",
   "regions.radius": "Raio",
   "regions.sky_geometry": "Geometria no plano do céu",
   "regions.source": "Fonte",
@@ -230,5 +230,7 @@
   "window.script": "Script reprodutível",
   "window.script_written": "Script gravado em:\n{path}",
   "window.session": "Sessão {obsid} · {path}",
-  "window.title": "XREDUX — Redução de pulsares do XMM-Newton"
+  "window.title": "XREDUX — Redução de pulsares do XMM-Newton",
+  "regions.pileup_unmeasured": "SEM MEDIDA: o epatplot não devolveu razões utilizáveis de simples e duplos, então o empilhamento NÃO foi avaliado. Confira a saída da tarefa no console. Taxa {rate} ct/s, {photons} fótons por quadro de {frame} ms.",
+  "status.busy_elsewhere": "Outra etapa ({step}) está em andamento; espere terminar ou cancele-a antes."
 }

@@ -95,7 +95,9 @@ class ProcessingPage(Page):
         rows = {item.row() for item in self._table.selectedItems()}
         if not rows:
             return
-        pipeline.state.selected = pipeline.state.event_lists[min(rows)]
+        # Pelo Pipeline, e não direto no estado: trocar de exposição invalida
+        # tudo o que foi derivado da anterior.
+        pipeline.select_events(pipeline.state.event_lists[min(rows)])
         self.set_status(t("processing.selected",
                           label=pipeline.state.selected.label()), "idle")
         self.window.refresh_pages()

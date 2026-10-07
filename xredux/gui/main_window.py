@@ -36,9 +36,9 @@ PAGE_CLASSES = (AcquisitionPage, CalibrationPage, ProcessingPage, FilteringPage,
                 RegionsPage, TimingPage, SpectraPage, ExportPage)
 
 STATUS_MARKS = {"pending": "○", "running": "◐", "done": "●",
-                "failed": "✕", "skipped": "◌"}
+                "failed": "✕", "skipped": "◌", "stale": "◍"}
 STATUS_TINTS = {"pending": "#8aa0c0", "running": "#4f8cff", "done": "#3fb950",
-                "failed": "#ff5f56", "skipped": "#e0a800"}
+                "failed": "#ff5f56", "skipped": "#e0a800", "stale": "#d18616"}
 
 
 class MainWindow(QMainWindow):
@@ -141,6 +141,9 @@ class MainWindow(QMainWindow):
 
         work_dir = self.settings.observation_dir(obsid, target, ra, dec)
         self.session = Session.load_or_create(work_dir, obsid, target)
+        if self.session.recovered_from is not None:
+            self._log(f"** xredux: session.json ilegível; cópia guardada em "
+                      f"{self.session.recovered_from}. A sessão recomeça vazia.")
         context = build_context(self.settings, self.session, on_line=self._log)
         self.pipeline = Pipeline(self.settings, self.session, context)
         self.pipeline.state.obsid = obsid
@@ -177,6 +180,29 @@ class MainWindow(QMainWindow):
     def pipeline_cancel(self) -> None:
         if self.pipeline is not None:
             self.pipeline.context.runner.cancel()
+
+    def busy_page(self):
+        """A página com tarefa em andamento, se houver.
+
+        Todas as páginas compartilham o mesmo Pipeline e o mesmo executor, que
+        acompanha um processo por vez: uma segunda tarefa simultânea, de outra
+        página, misturaria estado e perderia o controle do primeiro processo.
+        """
+        return next((page for page in self._pages if page.busy), None)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 — nome do Qt
+        """Cancela e espera a tarefa em andamento antes de fechar.
+
+        Fechar com uma thread ativa deixava o SAS rodando sem dono e a sessão
+        sem o registro do comando interrompido.
+        """
+        if self.busy_page() is not None:
+            self.pipeline_cancel()
+            for page in self._pages:
+                thread = getattr(page, "_thread", None)
+                if thread is not None and thread.isRunning():
+                    thread.wait(15_000)
+        super().closeEvent(event)
 
     def pipeline_runner_reset(self) -> None:
         if self.pipeline is not None:
@@ -245,6 +271,9 @@ class MainWindow(QMainWindow):
         # fonte. Apontar work_dir para a pasta da fonte — o que se fazia aqui —
         # promovia a fonte a raiz, e as observações seguintes iam ser arquivadas
         # dentro dela, uma fonte aninhada na outra.
+        if self.busy_page() is not None:
+            self._log(f"** xredux: {t('status.busy_elsewhere', step=t(f'step.{self.busy_page().key}'))}")
+            return
         root = (path.parent.parent if (path.parent / DESCRIPTOR).is_file()
                 else path.parent)
         if root != self.settings.work_dir:

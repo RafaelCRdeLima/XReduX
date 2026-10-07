@@ -200,6 +200,8 @@ def extract(context: TaskContext, archive: Path, destination: Path | None = None
     destination.mkdir(parents=True, exist_ok=True)
     context.log(f"$ tar -xf {archive} -C {destination}")
     _safe_extract(archive, destination)
+    context.session.record_action(STEP, f"extração de {archive.name}",
+                                  shell=["tar", "-xf", str(archive), "-C", str(destination)])
 
     inner = [path for path in destination.rglob("*")
              if path.is_file() and path.name.lower().endswith((".tar", ".tar.gz", ".tgz"))]
@@ -207,6 +209,11 @@ def extract(context: TaskContext, archive: Path, destination: Path | None = None
         context.log(f"$ tar -xf {nested} -C {nested.parent}")
         _safe_extract(nested, nested.parent)
         nested.unlink()
+        context.session.record_action(
+            STEP, f"extração de {nested.name}",
+            shell=["tar", "-xf", str(nested), "-C", str(nested.parent)])
+        context.session.record_action(STEP, f"remoção de {nested.name} já extraído",
+                                      shell=["rm", "-f", str(nested)])
 
     odf_dir = _locate_odf(destination)
     if odf_dir is None:
@@ -216,15 +223,33 @@ def extract(context: TaskContext, archive: Path, destination: Path | None = None
 
 
 def _safe_extract(archive: Path, destination: Path) -> None:
-    """Extrai recusando membros que escapariam do diretório de destino."""
+    """Extrai recusando membros que escapariam do diretório de destino.
+
+    A contenção é verificada por componentes de caminho, não por prefixo de
+    texto: ``odf_extra`` começa com ``odf`` e mesmo assim fica fora dele. Além
+    disso o filtro ``data`` do ``tarfile`` recusa caminhos absolutos, links que
+    apontam para fora do destino, arquivos de dispositivo e bits de permissão
+    perigosos. Um ODF só contém arquivos comuns; nada disso é necessário.
+    """
     destination = destination.resolve()
     try:
         with tarfile.open(archive) as tar:
-            for member in tar.getmembers():
+            members = tar.getmembers()
+            for member in members:
                 target = (destination / member.name).resolve()
-                if not str(target).startswith(str(destination)):
+                if not target.is_relative_to(destination):
                     raise ArchiveError(f"caminho suspeito no arquivo: {member.name}")
-            tar.extractall(destination)
+                if member.issym() or member.islnk():
+                    link = (target.parent / member.linkname).resolve() if member.issym() \
+                        else (destination / member.linkname).resolve()
+                    if not link.is_relative_to(destination):
+                        raise ArchiveError(
+                            f"link suspeito no arquivo: {member.name} -> {member.linkname}")
+                elif not (member.isfile() or member.isdir()):
+                    raise ArchiveError(f"membro de tipo inesperado no arquivo: {member.name}")
+            tar.extractall(destination, members=members, filter="data")
+    except tarfile.FilterError as error:
+        raise ArchiveError(f"membro recusado em {archive.name}: {error}") from error
     except (tarfile.TarError, OSError) as error:
         raise ArchiveError(f"falha ao extrair {archive.name}: {error}") from error
 

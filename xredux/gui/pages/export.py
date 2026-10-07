@@ -99,6 +99,12 @@ class ExportPage(Page):
         if pipeline is None or pipeline.state.barycentered is None:
             self.set_status(t("export.need_barycen"), "failed")
             return
+        # O CSV declara canais da resposta: sem a RMF desta observação não há
+        # grade de canais para declarar.
+        spectrum = pipeline.state.source_spectrum
+        if spectrum is None or spectrum.rmf is None:
+            self.set_status(t("export.need_response"), "failed")
+            return
         state = pipeline.state
         events = state.selected
         band = (self._low.value(), self._high.value())
@@ -162,6 +168,12 @@ class ExportPage(Page):
     def _csv_done(self, report) -> None:
         pipeline = self.window.pipeline
         pipeline.state.exported_csv = report.path
+        pipeline.session.record_action(
+            "export", f"CSV {report.path.name} escrito pelo XreduX: "
+                      f"{report.events_written} de {report.events_available} eventos"
+                      + (f", decimado com semente {report.decimation_seed}"
+                         if report.decimated else ""))
+        pipeline.session.save()
         lines = [
             t("export.csv_written", path=str(report.path)),
             t("export.csv_events", written=report.events_written,
@@ -309,5 +321,9 @@ class ExportPage(Page):
 
 
 def _profile_id(state) -> str:
+    # O submodo, como na linha de comando: o DATAMODE só distingue IMAGING de
+    # TIMING, e duas reduções da mesma observação saíam com nomes diferentes
+    # conforme o caminho (interface ou CLI).
     events = state.selected
-    return profile_export.identifier_for(state.obsid, events.instrument, events.mode)
+    return profile_export.identifier_for(state.obsid, events.instrument,
+                                         events.submode or events.mode)

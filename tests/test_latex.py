@@ -111,15 +111,74 @@ class NoInventionTest(unittest.TestCase):
         self.assertNotIn("$Z^2_n$", text)
         self.assertNotIn("H$-test", text)
 
+    def _recorded_section(self, state, record) -> str:
+        """A seção gerada com uma sessão em que ``record(session)`` registrou etapas."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = Session.load_or_create(Path(directory), state.obsid, state.target)
+            record(session)
+            return latex.build(state, session, settings=None)
+
     def test_what_was_done_does_appear(self) -> None:
         state = FakeState(selected=FakeEvents(), period_s=7.055240,
                           h_statistic=38.2, h_harmonics=1,
                           pulsed_fraction=(0.0134, 0.0022),
                           barycentered=Path("bary.fits"))
-        text = self._section(state)
+
+        def record(session) -> None:
+            session.begin("timing")
+            session.finish("timing")
+            search = session.step("period_search")
+            search.parameters.update({"methods": ["efsearch", "z2_refine"],
+                                      "refine_harmonics": 2,
+                                      "refine_band_ev": [150, 1200]})
+            session.finish("period_search")
+
+        text = self._recorded_section(state, record)
         self.assertIn(r"\texttt{barycen}", text)
+        self.assertIn(r"\texttt{efsearch}", text)
         self.assertIn("7.055240", text)
         self.assertIn("1.34", text)
+        self.assertIn("single-trial", text)
+
+    def test_a_period_without_a_recorded_method_claims_none(self) -> None:
+        """Auditoria XR-08: só ter period_s produzia efsearch e Z² no texto."""
+        text = self._section(FakeState(selected=FakeEvents(), period_s=7.0))
+        for claim in ("efsearch", "Z^2", "H$-test", "pulsed fraction"):
+            self.assertNotIn(claim, text)
+
+    def test_light_curve_without_background_is_not_called_subtracted(self) -> None:
+        from types import SimpleNamespace
+
+        curve = SimpleNamespace(band_ev=(150, 1200), binsize_s=1.0)
+        state = FakeState(selected=FakeEvents(), light_curve=curve)
+
+        def record(session) -> None:
+            session.begin("lightcurve", {"band_ev": [150, 1200]})
+            session.step("lightcurve").parameters["background_subtracted"] = False
+            session.finish("lightcurve")
+
+        text = self._recorded_section(state, record)
+        self.assertIn("light curve", text)
+        self.assertNotIn("subtracted", text)
+        self.assertNotIn("epiclccorr", text)
+
+    def test_spectrum_without_responses_does_not_claim_them(self) -> None:
+        from types import SimpleNamespace
+
+        spectrum = SimpleNamespace(background=None, rmf=None, arf=None, grouped=None,
+                                   total_counts=None, exposure_s=None)
+        state = FakeState(selected=FakeEvents(), source_spectrum=spectrum)
+
+        def record(session) -> None:
+            session.begin("spectra")
+            session.finish("spectra")
+
+        text = self._recorded_section(state, record)
+        self.assertIn("backscale", text)
+        for claim in ("rmfgen", "arfgen", "Source and background", "grouped"):
+            self.assertNotIn(claim, text)
 
     def test_unmeasured_values_are_loud(self) -> None:
         """Um número ausente tem de saltar aos olhos no PDF, não sumir."""

@@ -81,6 +81,39 @@ class EventList:
     def max_pattern(self) -> int:
         return MAX_PATTERN.get(self.instrument, 4)
 
+    @property
+    def product_prefix(self) -> str:
+        """Prefixo dos produtos derivados: câmera e exposição no nome.
+
+        Só a câmera não basta: duas exposições do pn na mesma observação
+        sobrescreveriam os produtos uma da outra.
+        """
+        exposure = "".join(ch for ch in self.exposure_id.lower() if ch.isalnum())
+        base = self.instrument.lower()
+        return f"{base}_{exposure}" if exposure else base
+
+    @property
+    def legacy_prefix(self) -> str:
+        """Prefixo dos produtos gerados antes de a exposição entrar no nome."""
+        return self.instrument.lower()
+
+    def matches(self, path: Path) -> bool:
+        """Se o arquivo FITS veio desta câmera e desta exposição.
+
+        Lê INSTRUME e EXPIDSTR, que o SAS propaga a todos os produtos derivados.
+        Um arquivo sem os cartões, ou ilegível, não é considerado desta exposição.
+        """
+        header = read_header(path)
+        if not header:
+            return False
+        instrument = str(header.get("INSTRUME") or "").strip().upper()
+        if instrument != self.instrument:
+            return False
+        if self.exposure_id:
+            exposure = str(header.get("EXPIDSTR") or "").strip()
+            return exposure == self.exposure_id
+        return True
+
     def time_resolution_us(self) -> float:
         """Resolução temporal desta exposição, preferindo o submodo."""
         submode = self.submode.upper().replace(" ", "")
@@ -202,21 +235,42 @@ class PileupCheck:
     #: São elas que decidem, e não um limiar de taxa escolhido a dedo.
     core: "PileupCheck | None" = None
     wings: "PileupCheck | None" = None
+    #: Final da saída do epatplot quando ela não trouxe as razões, para que o
+    #: motivo de "sem medida" fique visível em vez de sumir.
+    raw_tail: str = ""
+
+    def measured(self) -> bool:
+        """Se o epatplot devolveu razões utilizáveis para simples e duplos."""
+        for pair in (self.singles, self.doubles):
+            if pair is None or not (pair[1] > 0.0) or pair[0] != pair[0]:
+                return False
+        return True
 
     def photons_per_frame(self) -> float:
         """Fótons na região a cada leitura do detector."""
         return self.rate_ct_s * self.frame_time_s
 
     def doubles_excess_sigma(self) -> float | None:
-        """Quantos desvios a sobra de duplos está de zero."""
-        if self.doubles is None or self.doubles[1] <= 0.0:
+        """Quantos desvios o excesso de duplos está de zero."""
+        if self.doubles is None or not (self.doubles[1] > 0.0):
             return None
         return (self.doubles[0] - 1.0) / self.doubles[1]
 
+    def singles_deficit_sigma(self) -> float | None:
+        """Quantos desvios o déficit de simples está de zero."""
+        if self.singles is None or not (self.singles[1] > 0.0):
+            return None
+        return (1.0 - self.singles[0]) / self.singles[1]
+
     def suspicious(self) -> bool:
-        """Se há sobra de duplos que peça explicação."""
-        excess = self.doubles_excess_sigma()
-        return excess is not None and excess >= 3.0
+        """Se há excesso de duplos ou déficit de simples que peça explicação.
+
+        As duas metades da assinatura contam: o empilhamento tira eventos
+        simples e cria duplos, e uma delas pode ficar significativa antes da
+        outra.
+        """
+        return any(value is not None and value >= 3.0
+                   for value in (self.doubles_excess_sigma(), self.singles_deficit_sigma()))
 
     def gradient_sigma(self) -> float | None:
         """Quanto a sobra de duplos cresce do núcleo para as asas, em desvios.
@@ -233,20 +287,32 @@ class PileupCheck:
         """
         if self.core is None or self.wings is None:
             return None
-        if self.core.doubles is None or self.wings.doubles is None:
-            return None
-        difference = self.core.doubles[0] - self.wings.doubles[0]
-        spread = math.hypot(self.core.doubles[1], self.wings.doubles[1])
-        return difference / spread if spread > 0.0 else None
+        gradients = []
+        # Duplos sobram mais no núcleo; simples faltam mais no núcleo.
+        for attribute, sign in (("doubles", 1.0), ("singles", -1.0)):
+            core, wings = getattr(self.core, attribute), getattr(self.wings, attribute)
+            if core is None or wings is None:
+                continue
+            spread = math.hypot(core[1], wings[1])
+            if spread > 0.0:
+                gradients.append(sign * (core[0] - wings[0]) / spread)
+        return max(gradients) if gradients else None
 
     def verdict(self) -> str:
-        """``clean``, ``pileup``, ``unexplained`` ou ``inconclusive``.
+        """``unmeasured``, ``clean``, ``pileup``, ``unexplained`` ou ``inconclusive``.
+
+        ``unmeasured`` quer dizer que o epatplot não devolveu razões utilizáveis:
+        nada foi avaliado, e isso não pode virar "limpo". ``unexplained`` quer
+        dizer que não há evidência de que o excesso cresça para o núcleo, o que
+        não prova que a causa seja outra.
 
         Um limiar de taxa não resolveria: mede-se a taxa da região inteira, mas
         o empilhamento vive no núcleo da PSF, e quanto da luz cai ali depende da
         PSF, do binning e do raio — arbitrar um corte seria trocar uma medida
         por um palpite. Então mede-se núcleo e asas, e compara-se.
         """
+        if not self.measured():
+            return "unmeasured"
         if not self.suspicious():
             return "clean"
         gradient = self.gradient_sigma()
@@ -266,8 +332,8 @@ def check_pileup(context: TaskContext, events: EventList, source,
     """
     # PDF porque o auxiliar do SAS 22.1 só produz isso: pedir PostScript faz
     # ele avisar "Only format supported now is pdf" e trocar a extensão sozinho.
-    output = output or context.work_dir / f"{events.instrument.lower()}_pileup.pdf"
-    selected = context.work_dir / f"{events.instrument.lower()}_pileup_evts.ds"
+    output = output or context.work_dir / f"{events.product_prefix}_pileup.pdf"
+    selected = context.work_dir / f"{output.stem}_evts.ds"
     # Sem filtro de PATTERN, ao contrário de todas as outras seleções. É a
     # distribuição de padrões que está sendo diagnosticada: cortar em
     # PATTERN<=4 joga fora triplos e quádruplos, deixa o epatplot avisando
@@ -308,6 +374,10 @@ def check_pileup(context: TaskContext, events: EventList, source,
         doubles=((float(fractions.group("d")), float(fractions.group("de")))
                  if fractions else None),
     )
+    if not check.measured():
+        tail = [line for line in (getattr(result, "output", "") or "").splitlines()
+                if line.strip()][-12:]
+        check.raw_tail = "\n".join(tail)
 
     # Só se houver o que explicar, e só uma vez: a chamada recursiva pede
     # explicitamente para não repetir o teste.

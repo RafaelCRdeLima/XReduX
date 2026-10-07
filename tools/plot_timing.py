@@ -34,7 +34,8 @@ def parse_arguments() -> argparse.Namespace:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--obsid", required=True)
     parser.add_argument("--events", type=Path,
-                        help="lista baricentrada (padrão: epn_clean_bary.fits)")
+                        help="lista baricentrada (padrão: a mais recente epn*_bary_source.fits "
+                             "ou epn*_clean_bary.fits)")
     parser.add_argument("--period", type=float, required=True)
     parser.add_argument("--band", type=int, nargs=2, default=(150, 1200))
     parser.add_argument("--harmonics", type=int, default=2)
@@ -60,10 +61,13 @@ def main() -> int:
     source_name = arguments.source or (source.name if source else arguments.obsid)
     # A lista da região da fonte é a certa: sobre o campo inteiro o fundo dilui
     # a amplitude do pulso.
-    events = arguments.events or next(
-        (candidate for candidate in (work / "epn_bary_source.fits",
-                                     work / "epn_clean_bary.fits")
-         if candidate.is_file()), work / "epn_clean_bary.fits")
+    # Os nomes trazem câmera e exposição (epn_s003_...); os antigos, só a câmera.
+    def newest(pattern: str) -> Path | None:
+        found = [path for path in work.glob(pattern) if ".parcial." not in path.name]
+        return max(found, key=lambda path: path.stat().st_mtime) if found else None
+
+    events = arguments.events or newest("epn*_bary_source.fits") \
+        or newest("epn*_clean_bary.fits") or work / "epn_clean_bary.fits"
     if not events.is_file():
         print(f"lista de eventos não encontrada: {events}")
         return 1

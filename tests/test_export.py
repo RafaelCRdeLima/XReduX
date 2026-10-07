@@ -232,13 +232,49 @@ class EventExportTest(unittest.TestCase):
 
     def test_decimation_is_reproducible_and_reported(self) -> None:
         first = self.export(max_events=500)
+        first_text = first.path.read_text(encoding="utf-8")
         second = self.export(max_events=500)
         self.assertTrue(first.decimated)
-        self.assertEqual(first.events_written, 500)
+        self.assertLessEqual(first.events_written, 500)
+        self.assertGreater(first.events_written, 300)
         self.assertEqual(first.decimation_seed, 1234)
         self.assertTrue(any("decimada" in message for message in first.warnings))
-        self.assertEqual(first.path.read_text(encoding="utf-8").count("\n"),
-                         second.path.read_text(encoding="utf-8").count("\n"))
+        self.assertEqual(first_text, second.path.read_text(encoding="utf-8"))
+
+    def metadata(self, report) -> dict[str, str]:
+        return dict(line[1:].strip().split("=", 1)
+                    for line in report.path.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("#") and "=" in line)
+
+    def test_decimation_declares_the_effective_exposure(self) -> None:
+        """Auditoria XR-04: a exposição declarada tem de ser a da amostra."""
+        full = self.metadata(self.export())
+        thinned_report = self.export(max_events=500)
+        thinned = self.metadata(thinned_report)
+        probability = float(thinned["decimation_probability"])
+        self.assertAlmostEqual(float(thinned["exposure_s"]),
+                               float(full["exposure_s"]) * probability, places=3)
+        self.assertEqual(thinned["livetime_full_s"], full["exposure_s"])
+        self.assertEqual(thinned["decimation_seed"], "1234")
+        self.assertEqual(int(thinned["events_before_decimation"]),
+                         thinned_report.events_available)
+
+    def test_time_origin_does_not_depend_on_band_or_decimation(self) -> None:
+        reference = self.metadata(self.export())["time_origin_s"]
+        self.assertEqual(self.metadata(self.export(band_ev=(1_000, 2_000)))["time_origin_s"],
+                         reference)
+        self.assertEqual(self.metadata(self.export(max_events=500, seed=9))["time_origin_s"],
+                         reference)
+
+    def test_events_outside_the_response_grid_are_dropped(self) -> None:
+        """Auditoria XR-11: nada de canal inventado fora da EBOUNDS."""
+        channels, inside = pulsaris._channel_from_ebounds(
+            np.array([-0.1, 0.5, 1e3]), self.rmf)
+        self.assertEqual(inside.tolist(), [False, True, False])
+
+    def test_export_without_response_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            self.export(rmf=None)
 
     def test_rejects_empty_selection(self) -> None:
         with self.assertRaises(ValueError):

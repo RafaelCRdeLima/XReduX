@@ -138,6 +138,94 @@ class Pipeline:
             raise
         return result
 
+    # -- dependências e invalidação ----------------------------------------
+
+    #: Produtos que cada mudança de entrada torna obsoletos, e as etapas da
+    #: sessão correspondentes. Um consumidor sempre prefere o objeto em
+    #: memória; deixá-lo ali depois que a entrada mudou mistura, sem erro
+    #: nenhum, eventos de uma câmera com respostas de outra, ou o período de
+    #: uma região com o espectro de outra.
+    _TIMING_RESULTS_STATE = ("period_search", "search_confirmed", "search_probability",
+                             "refined", "h_statistic", "h_harmonics", "pulsed_fraction",
+                             "pulsed_fraction_rms", "event_count", "advised_harmonics",
+                             "candidates", "fold_file", "pulse_profile")
+    _DOWNSTREAM: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+        # mudança: (atributos do estado, etapas da sessão)
+        "selection": (
+            ("background_curve", "threshold", "gti", "clean_events", "barycentered",
+             "source_event_list", "image", "pileup", "pileup_plot", "light_curve",
+             "corrected_light_curve", "period_s", *_TIMING_RESULTS_STATE,
+             "source_spectrum", "background_spectrum", "phase_spectra",
+             "exported_csv", "profile_bundle"),
+            ("filtering", "timing", "source_events", "lightcurve", "period_search",
+             "spectra")),
+        "filtering": (
+            ("barycentered", "source_event_list", "light_curve", "corrected_light_curve",
+             "period_s", *_TIMING_RESULTS_STATE, "source_spectrum",
+             "background_spectrum", "phase_spectra", "exported_csv", "profile_bundle"),
+            ("timing", "source_events", "lightcurve", "period_search", "spectra")),
+        "regions": (
+            ("source_event_list", "pileup", "pileup_plot", "light_curve",
+             "corrected_light_curve", "period_s", *_TIMING_RESULTS_STATE,
+             "source_spectrum", "background_spectrum", "phase_spectra",
+             "exported_csv", "profile_bundle"),
+            ("source_events", "lightcurve", "period_search", "spectra")),
+        "timing": (
+            ("source_event_list", "light_curve", "corrected_light_curve", "period_s",
+             *_TIMING_RESULTS_STATE, "phase_spectra", "exported_csv", "profile_bundle"),
+            ("source_events", "lightcurve", "period_search")),
+        # Uma curva nova não invalida o período como candidato digitado ou já
+        # achado, mas invalida tudo o que foi medido sobre a curva anterior.
+        "lightcurve": ((*_TIMING_RESULTS_STATE,), ("period_search",)),
+        "spectra": (("phase_spectra", "exported_csv", "profile_bundle"), ()),
+    }
+
+    def _invalidate(self, change: str, reason: str) -> list[str]:
+        """Descarta os produtos que dependiam de ``change`` e avisa a sessão."""
+        attributes, steps = self._DOWNSTREAM[change]
+        defaults = ReductionState()
+        cleared = []
+        for attribute in attributes:
+            current = getattr(self.state, attribute)
+            if current is None or current == [] or current == getattr(defaults, attribute):
+                continue
+            setattr(self.state, attribute, getattr(defaults, attribute))
+            cleared.append(attribute)
+        marked = self.session.invalidate(steps, reason)
+        # Os resultados de timing ficam nos parâmetros da própria etapa; sem
+        # apagá-los, uma retomada os traria de volta.
+        if "period_search" in steps and "period_search" in self.session.steps:
+            self.session.steps["period_search"].parameters = {}
+            self.session.save()
+        if cleared or marked:
+            self.context.log(f"** xredux: {reason}; descartados: "
+                             + ", ".join(cleared + [f"etapa {name}" for name in marked]))
+        return cleared
+
+    def select_events(self, events: EventList) -> None:
+        """Escolhe a câmera/exposição sobre a qual o resto da redução trabalha.
+
+        Trocar de exposição invalida tudo o que foi derivado da anterior. As
+        regiões no céu (X, Y) valem para qualquer câmera em modo de imagem, mas
+        não entre modo de imagem e modo Timing, em que a região é uma faixa de
+        colunas do detector.
+        """
+        previous = self.state.selected
+        self.state.selected = events
+        self.session.begin("selection", {
+            "path": str(events.path), "instrument": events.instrument,
+            "exposure_id": events.exposure_id, "mode": events.mode,
+            "submode": events.submode})
+        self.session.finish("selection", message=events.label())
+        if previous is None or previous.path == events.path:
+            return
+        self._invalidate("selection", f"exposição trocada de {previous.label()} "
+                                      f"para {events.label()}")
+        fast = {"TIMING", "BURST"}
+        if (previous.mode in fast) != (events.mode in fast):
+            self.state.source_region = self.state.background_region = None
+            self.session.invalidate(["regions"], "o modo de leitura mudou; refaça as regiões")
+
     # -- retomada ---------------------------------------------------------
 
     def restore(self) -> list[str]:
@@ -145,17 +233,18 @@ class Pipeline:
 
         A sessão guarda o que foi feito, mas não o estado em memória. Sem esta
         reconstrução, reabrir uma observação mostra as etapas marcadas como
-        concluídas e todas as páginas vazias — coordenadas zeradas, nenhuma lista
-        de eventos — o que é pior do que não marcar nada, porque parece pronto.
+        concluídas e todas as páginas vazias.
 
-        Cada peça é restaurada só se o arquivo ainda existir: um produto apagado
-        para liberar espaço não deve impedir o resto de voltar.
+        Existência de arquivo não basta: um produto só volta se a etapa que o
+        gera estiver concluída na sessão e se o cabeçalho confirmar que ele veio
+        da câmera e da exposição selecionadas (e, para a lista baricêntrica, que
+        a correção foi de fato aplicada). Sessões gravadas antes dessas regras
+        (esquema 1) não registram tudo isso; para elas vale só a verificação
+        de cabeçalho, e o que não puder ser verificado é refeito.
         """
         restored: list[str] = []
         session, work = self.session, self.work_dir
-
-        def _existing(path: Path) -> Path | None:
-            return path if path.is_file() else None
+        legacy = session.schema < 2
 
         def outputs(step: str) -> list[Path]:
             record = session.steps.get(step)
@@ -167,27 +256,22 @@ class Pipeline:
                 restored.append("ODF")
                 break
 
-        # Os produtos no disco valem mais que o registro da sessão: uma etapa
-        # pode falhar depois de gerá-los, ou ser refeita fora do fluxo gravado.
-        # Só a calibração dependia do registro, e um passo marcado como falho
-        # não registra saída nenhuma — a página abria vazia com o ccf.cif e o
-        # SUM.SAS ali do lado.
         cif = next((item for item in outputs("calibration")
-                    if item.suffix == ".cif" and item.is_file()),
-                   None) or _existing(work / "ccf.cif")
+                    if item.suffix == ".cif" and item.is_file()), None)
+        if cif is None and (work / "ccf.cif").is_file():
+            cif = work / "ccf.cif"
         summary = next((item for item in outputs("calibration")
                         if item.name.endswith("SUM.SAS") and item.is_file()),
                        None) or newest(work, "*SUM.SAS")
-        if cif and summary:
-            # Sem isto a etapa fica marcada com ✗ ao lado de uma página cheia,
-            # e o usuário refaz um trabalho que já está pronto.
-            if not session.is_done("calibration"):
-                session.finish("calibration", outputs=[cif, summary])
+        calibrated = session.is_done("calibration") or legacy
+        if cif and summary and calibrated and _calibration_valid(cif, summary):
             # O sumário guarda o caminho absoluto do ODF; se a observação mudou
             # de lugar, ele aponta para o nada e o epproc falha reclamando de
             # outro arquivo.
             if calibration.repoint_summary(summary, self.state.odf_dir or work / "odf"):
                 restored.append("caminho do ODF no sumário")
+                session.record_action("calibration", f"linha PATH de {summary.name} "
+                                      "reapontada para o ODF atual (edição do XreduX)")
             self.context.env["SAS_CCF"] = str(cif)
             self.context.env["SAS_ODF"] = str(summary)
             setup = calibration.read_setup(self.context, cif, summary,
@@ -198,41 +282,78 @@ class Pipeline:
             if self.state.ra is None:
                 self.state.ra, self.state.dec = setup.ra, setup.dec
             restored.append("calibração")
+        elif cif and summary:
+            restored.append("calibração NÃO restaurada (etapa não concluída)")
 
         events = epic.discover(work)
         if events:
             self.state.event_lists = events
-            self.state.selected = _prefer_fast_pn(events)
+            self.state.selected = self._recorded_selection(events) or _prefer_fast_pn(events)
             restored.append(f"{len(events)} lista(s) de eventos")
 
-        if self.state.selected is not None:
-            prefix = self.state.selected.instrument.lower()
-            for attribute, name in (("gti", f"{prefix}_gti.fits"),
-                                    ("clean_events", f"{prefix}_clean.fits"),
-                                    ("barycentered", f"{prefix}_clean_bary.fits"),
-                                    ("source_event_list", f"{prefix}_bary_source.fits"),
-                                    ("image", f"{prefix}_image.fits")):
-                candidate = work / name
-                if candidate.is_file():
-                    setattr(self.state, attribute, candidate)
-            rate = work / f"{prefix}_bkg_rate.fits"
-            if rate.is_file():
+        selected = self.state.selected
+        if selected is not None:
+            def done(step: str) -> bool:
+                return session.is_done(step) or legacy
+
+            def product(*names: str) -> Path | None:
+                """Primeiro arquivo existente desta exposição."""
+                for name in names:
+                    candidate = work / name
+                    if candidate.is_file() and selected.matches(candidate):
+                        return candidate
+                return None
+
+            new, old = selected.product_prefix, selected.legacy_prefix
+            if done("filtering"):
+                self.state.clean_events = product(f"{new}_clean.fits", f"{old}_clean.fits")
+                if self.state.clean_events is not None:
+                    gti = next((work / name for name in (f"{new}_gti.fits", f"{old}_gti.fits")
+                                if (work / name).is_file()), None)
+                    self.state.gti = gti
+                    restored.append("filtragem")
+            if done("timing"):
+                bary = product(f"{new}_clean_bary.fits", f"{old}_clean_bary.fits")
+                if bary is not None and timing.is_barycentered(bary):
+                    self.state.barycentered = bary
+                elif bary is not None:
+                    restored.append("lista baricêntrica descartada: TIMEREF não confirma a correção")
+            self.state.image = product(f"{new}_image.fits", f"{old}_image.fits")
+            rate = product(f"{new}_bkg_rate.fits", f"{old}_bkg_rate.fits")
+            if rate is not None:
                 moment, values = filtering.read_rate(rate)
                 self.state.background_curve = filtering.BackgroundCurve(
-                    path=rate, time=moment, rate=values,
-                    instrument=self.state.selected.instrument, binsize_s=100.0)
-                self.state.threshold = self.state.background_curve.suggested_threshold()
-            if self.state.clean_events:
-                restored.append("filtragem")
+                    path=rate, time=moment, rate=values, instrument=selected.instrument,
+                    binsize_s=_time_bin(rate) or 100.0, prefix=new)
+                applied = session.steps.get("filtering")
+                threshold = applied.parameters.get("threshold") if applied else None
+                self.state.threshold = (float(threshold) if threshold is not None
+                                        and done("filtering")
+                                        else self.state.background_curve.suggested_threshold())
 
         self._restore_regions()
+        self._restore_source_events()
         self._restore_timing()
         self._restore_spectra()
         return restored
 
+    def _recorded_selection(self, events: list[EventList]) -> EventList | None:
+        """A exposição escolhida da última vez, se ainda estiver entre as listas."""
+        record = self.session.steps.get("selection")
+        if record is None or record.status != "done":
+            return None
+        wanted = record.parameters
+        for item in events:
+            if (item.instrument == wanted.get("instrument")
+                    and item.exposure_id == wanted.get("exposure_id", item.exposure_id)):
+                return item
+        return None
+
     def _restore_regions(self) -> None:
         record = self.session.steps.get("regions")
         if record is None:
+            return
+        if self.session.schema >= 2 and record.status != "done":
             return
         for attribute, key in (("source_region", "source"),
                                ("background_region", "background")):
@@ -241,45 +362,117 @@ class Pipeline:
                 continue
             description = record.parameters.get(f"{key}_description", "")
             kind = record.parameters.get(f"{key}_kind", "")
+            geometry = record.parameters.get(f"{key}_geometry") or {}
+            if not geometry or not kind:
+                parsed_kind, parsed = regions.geometry_of(str(expression))
+                kind, geometry = kind or parsed_kind, geometry or parsed
             setattr(self.state, attribute,
                     Region(expression=str(expression), kind=str(kind),
-                           description=str(description) or str(expression)))
+                           description=str(description) or str(expression),
+                           geometry={k: float(v) for k, v in geometry.items()}))
+
+    def _restore_source_events(self) -> None:
+        """A lista da região da fonte, só se veio desta região e desta lista.
+
+        Sessões antigas não registram de onde ela veio — nem a região, nem a
+        banda de energia cortada nela —, então ali ela é refeita sob demanda.
+        """
+        record = self.session.steps.get("source_events")
+        region, table = self.state.source_region, self.state.barycentered
+        if record is None or record.status != "done" or region is None or table is None:
+            return
+        parameters = record.parameters
+        path = Path(parameters.get("output", ""))
+        if (parameters.get("region") == region.expression
+                and parameters.get("table") == str(table)
+                and parameters.get("band_ev") is None
+                and path.is_file() and self.state.selected is not None
+                and self.state.selected.matches(path)):
+            self.state.source_event_list = path
 
     def _restore_timing(self) -> None:
+        legacy = self.session.schema < 2
         record = self.session.steps.get("period_search")
-        parameters = record.parameters if record else {}
+        parameters: dict = {}
+        if record is not None and (record.status == "done" or legacy):
+            parameters = record.parameters
         # O período antigo ficava no passo "timing"; sessões gravadas antes da
         # mudança continuam legíveis.
-        legacy = self.session.steps.get("timing")
-        if "period_s" not in parameters and legacy is not None:
-            parameters = {**legacy.parameters}
-        for field in self.TIMING_RESULTS:
-            value = parameters.get(field)
-            if value is None:
-                continue
-            # As frações são pares (valor, incerteza); o JSON as devolve como
-            # lista, e quem as consome espera uma tupla.
-            setattr(self.state, field, tuple(value) if isinstance(value, list) else value)
-        if self.state.source_region is None:
+        old = self.session.steps.get("timing")
+        if legacy and "period_s" not in parameters and old is not None:
+            parameters = {**old.parameters}
+        if parameters:
+            for field in self.TIMING_RESULTS:
+                value = parameters.get(field)
+                if value is None:
+                    continue
+                # As frações são pares (valor, incerteza); o JSON as devolve como
+                # lista, e quem as consome espera uma tupla.
+                setattr(self.state, field,
+                        tuple(value) if isinstance(value, list) else value)
+        if self.state.source_region is None or self.state.selected is None:
             return
-        for path in sorted(self.work_dir.glob("src_lc_*.fits")):
-            if "corr" in path.name:
-                continue
-            moment, values, error = timing.read_light_curve(path)
-            band = _band_from_name(path.name)
-            self.state.light_curve = timing.LightCurve(
-                path=path, time=moment, rate=values, error=error,
-                binsize_s=1.0, band_ev=band)
-            break
+        curve = self.session.steps.get("lightcurve")
+        if curve is not None and curve.status == "done":
+            path = Path(curve.parameters.get("path", ""))
+            band = tuple(curve.parameters.get("band_ev") or ())
+            corrected = curve.parameters.get("corrected")
+            if path.is_file() and self.state.selected.matches(path) and len(band) == 2:
+                self._load_light_curve(path, band)
+                if corrected and Path(corrected).is_file():
+                    self.state.corrected_light_curve = Path(corrected)
+            return
+        if not legacy:
+            return
+        # Sessões antigas: a curva mais recente desta exposição, com o bin lido
+        # do cabeçalho em vez de suposto.
+        curves = [path for path in self.work_dir.glob("src_lc_*.fits")
+                  if "corr" not in path.name and self.state.selected.matches(path)]
+        if curves:
+            path = max(curves, key=lambda item: item.stat().st_mtime)
+            self._load_light_curve(path, _band_from_name(path.name))
+            corrected = path.with_name(path.stem + "_corr.fits")
+            if corrected.is_file():
+                self.state.corrected_light_curve = corrected
+
+    def _load_light_curve(self, path: Path, band: tuple[int, int]) -> None:
+        moment, values, error = timing.read_light_curve(path)
+        self.state.light_curve = timing.LightCurve(
+            path=path, time=moment, rate=values, error=error,
+            binsize_s=_time_bin(path) or 1.0, band_ev=(int(band[0]), int(band[1])))
 
     def _restore_spectra(self) -> None:
-        source = self.work_dir / "src_spec.fits"
-        if not source.is_file() or self.state.selected is None:
+        selected = self.state.selected
+        if selected is None:
             return
-        spectrum = spectra.Spectrum(path=source,
-                                    instrument=self.state.selected.instrument)
-        for attribute, name in (("background", "bkg_spec.fits"), ("rmf", "src.rmf"),
-                                ("arf", "src.arf"), ("grouped", "src_spec_grp.fits")):
+        record = self.session.steps.get("spectra")
+        legacy = self.session.schema < 2
+        if record is None or not (record.status == "done" or legacy):
+            return
+        parameters = record.parameters
+        if not legacy:
+            # O espectro só vale para as regiões e a exposição com que foi extraído.
+            source_region, background_region = (self.state.source_region,
+                                                self.state.background_region)
+            if (source_region is None
+                    or parameters.get("source_region") != source_region.expression
+                    or parameters.get("background_region") != (
+                        background_region.expression if background_region else None)
+                    or parameters.get("exposure_id") != selected.exposure_id
+                    or parameters.get("instrument") != selected.instrument):
+                return
+        stems = [f"{selected.product_prefix}_src", "src"]
+        for stem in stems:
+            source = self.work_dir / f"{stem}_spec.fits"
+            if source.is_file() and selected.matches(source):
+                break
+        else:
+            return
+        background_stem = stem.replace("src", "bkg")
+        spectrum = spectra.Spectrum(path=source, instrument=selected.instrument)
+        for attribute, name in (("background", f"{background_stem}_spec.fits"),
+                                ("rmf", f"{stem}.rmf"), ("arf", f"{stem}.arf"),
+                                ("grouped", f"{stem}_spec_grp.fits")):
             candidate = self.work_dir / name
             if candidate.is_file():
                 setattr(spectrum, attribute, candidate)
@@ -363,8 +556,12 @@ class Pipeline:
                 self.state.om_products = products
 
             self.state.event_lists = events
-            if events and self.state.selected is None:
-                self.state.selected = _prefer_fast_pn(events)
+            if events:
+                current = self.state.selected
+                still_there = current is not None and any(
+                    item.path == current.path for item in events)
+                if not still_there:
+                    self.select_events(_prefer_fast_pn(events))
             self.session.finish("processing", outputs=[item.path for item in events],
                                 message=f"{len(events)} lista(s) de eventos")
             return events
@@ -393,6 +590,7 @@ class Pipeline:
         threshold = threshold if threshold is not None else curve.suggested_threshold()
 
         def work() -> Path:
+            self._invalidate("filtering", f"filtragem refeita com limiar {threshold:g}")
             gti = filtering.make_gti(self.context, curve, threshold)
             clean = filtering.filter_events(self.context, events, gti=gti,
                                             energy_min_ev=energy_min_ev,
@@ -417,12 +615,26 @@ class Pipeline:
         return image
 
     def set_regions(self, source: Region, background: Region) -> None:
-        """Fixa as regiões de fonte e fundo e conclui a etapa."""
+        """Fixa as regiões de fonte e fundo e conclui a etapa.
+
+        A geometria vai junto para a sessão: sem ela, uma região restaurada não
+        consegue gerar núcleo e asas, e o teste de empilhamento fica sem decisão.
+        """
+        old_source, old_background = self.state.source_region, self.state.background_region
+        changed = (old_source is None or old_background is None
+                   or old_source.expression != source.expression
+                   or old_background.expression != background.expression)
+        # Também quando não havia região: um produto derivado sem região
+        # registrada tem procedência desconhecida e não pode ser herdado.
+        if changed:
+            self._invalidate("regions", "regiões de extração alteradas")
         self.session.begin("regions", {
             "source": source.expression, "source_kind": source.kind,
             "source_description": source.description,
+            "source_geometry": dict(source.geometry),
             "background": background.expression, "background_kind": background.kind,
-            "background_description": background.description})
+            "background_description": background.description,
+            "background_geometry": dict(background.geometry)})
         self.state.source_region = source
         self.state.background_region = background
         self.session.finish("regions", message=f"{source.description} / {background.description}")
@@ -452,6 +664,7 @@ class Pipeline:
                 "coordenadas da fonte desconhecidas; informe-as antes de baricentrar")
 
         def work() -> Path:
+            self._invalidate("timing", "correção baricêntrica refeita")
             corrected = timing.barycenter(self.context, self.state.clean_events, ra, dec)
             self.state.barycentered = corrected
             self.session.finish("timing", outputs=[corrected],
@@ -462,22 +675,49 @@ class Pipeline:
 
     def light_curve(self, band_ev: tuple[int, int] = (300, 10_000),
                     binsize_s: float = 1.0, corrected: bool = True) -> timing.LightCurve:
-        """Extrai a curva de luz da fonte, opcionalmente corrigida."""
+        """Extrai a curva de luz da fonte, opcionalmente corrigida.
+
+        A curva anterior e tudo o que foi medido sobre ela deixam de valer, e a
+        sessão registra se houve correção e subtração de fundo — é o que a seção
+        do artigo pode afirmar, e nada além.
+        """
         events = self.state.barycentered or self.state.clean_events
         if events is None or self.state.source_region is None:
             raise RuntimeError("é preciso ter eventos filtrados e uma região de fonte")
+        prefix = self._require_selected().product_prefix
 
-        curve = timing.extract_light_curve(
-            self.context, events, self.state.source_region.expression,
-            band_ev=band_ev, binsize_s=binsize_s, name="src")
-        self.state.light_curve = curve
+        self._invalidate("lightcurve", "curva de luz refeita")
+        self.state.light_curve = self.state.corrected_light_curve = None
+        self.session.begin("lightcurve", {
+            "band_ev": list(band_ev), "binsize_s": binsize_s, "events": str(events),
+            "region": self.state.source_region.expression})
+        try:
+            curve = timing.extract_light_curve(
+                self.context, events, self.state.source_region.expression,
+                band_ev=band_ev, binsize_s=binsize_s, name=f"{prefix}_src")
+            self.state.light_curve = curve
 
-        if corrected and self.state.background_region is not None:
-            background = timing.extract_light_curve(
-                self.context, events, self.state.background_region.expression,
-                band_ev=band_ev, binsize_s=binsize_s, name="bkg")
-            self.state.corrected_light_curve = timing.correct_light_curve(
-                self.context, curve.path, events, background.path)
+            background_subtracted = False
+            if corrected and self.state.background_region is not None:
+                background = timing.extract_light_curve(
+                    self.context, events, self.state.background_region.expression,
+                    band_ev=band_ev, binsize_s=binsize_s, name=f"{prefix}_bkg")
+                self.state.corrected_light_curve = timing.correct_light_curve(
+                    self.context, curve.path, events, background.path)
+                background_subtracted = True
+        except Exception as error:
+            self.session.fail("lightcurve", str(error))
+            raise
+        record = self.session.step("lightcurve")
+        record.parameters.update({
+            "path": str(curve.path),
+            "corrected": (str(self.state.corrected_light_curve)
+                          if self.state.corrected_light_curve else None),
+            "background_subtracted": background_subtracted,
+            "background_region": (self.state.background_region.expression
+                                  if background_subtracted else None)})
+        self.session.finish("lightcurve", outputs=[path for path in (
+            curve.path, self.state.corrected_light_curve) if path])
         return curve
 
     def find_period(self, period_range: tuple[float, float] = (2.0, 500.0)):
@@ -493,10 +733,14 @@ class Pipeline:
         table = self.state.source_event_list or self.state.barycentered
         if table is None:
             raise RuntimeError("é preciso ter eventos baricentrados")
-        times = timing.read_arrival_times(table, band_ev=self.state.light_curve.band_ev)
+        band = self.state.light_curve.band_ev
+        times = timing.read_arrival_times(table, band_ev=band)
         candidates = timing.blind_search(self.context, self.state.light_curve, times,
                                          period_range=period_range)
         self.state.candidates = candidates
+        self._remember_timing("blind_search", {
+            "blind_band_ev": list(band), "blind_range_s": list(period_range),
+            "blind_candidates_s": [item.period_s for item in candidates[:5]]})
         return candidates
 
     def search_period(self, center_period_s: float, resolution_s: float | None = None,
@@ -519,7 +763,10 @@ class Pipeline:
         self.state.period_search = result
         self.state.period_s = result.best_period_s
         self._confirm(result.best_period_s)
-        self._remember_timing()
+        self._remember_timing("efsearch", {
+            "efsearch_center_s": center_period_s, "efsearch_trials": trials,
+            "efsearch_phase_bins": phase_bins,
+            "efsearch_light_curve": str(self.state.light_curve.path)})
         return result
 
     #: Resultados do timing que a sessão guarda para a próxima abertura.
@@ -527,19 +774,28 @@ class Pipeline:
                       "h_statistic", "h_harmonics", "pulsed_fraction",
                       "pulsed_fraction_rms", "event_count", "advised_harmonics")
 
-    def _remember_timing(self) -> None:
-        """Guarda os resultados do timing num passo só deles.
+    def _remember_timing(self, method: str, details: dict | None = None) -> None:
+        """Guarda os resultados do timing num passo só deles, com o método.
 
         Ficavam nos parâmetros do passo ``timing``, que a correção baricêntrica
         reescreve inteiro ao começar — bastava refazer o barycen para o período
         já encontrado sumir da sessão sem aviso.
+
+        ``methods`` acumula o que de fato rodou (busca cega, efsearch, refino
+        Z²ₙ). É dele que a seção do artigo tira o que pode afirmar: ter um
+        período não diz como ele foi obtido.
         """
         record = self.session.step("period_search")
         for field in self.TIMING_RESULTS:
             value = getattr(self.state, field, None)
             if value is not None:
                 record.parameters[field] = value
-        self.session.save()
+        methods = list(record.parameters.get("methods") or [])
+        if method not in methods:
+            methods.append(method)
+        record.parameters["methods"] = methods
+        record.parameters.update(details or {})
+        self.session.finish("period_search")
 
     def _confirm(self, period_s: float) -> None:
         """Confere o pico do efsearch contra os tempos de chegada não binados.
@@ -569,9 +825,11 @@ class Pipeline:
         if self.state.barycentered is None or self.state.period_s is None:
             raise RuntimeError("é preciso ter eventos baricentrados e um período candidato")
         # A região da fonte importa: sobre o campo inteiro o fundo dilui a
-        # amplitude e a fração pulsada sai subestimada.
+        # amplitude e a fração pulsada sai subestimada. A seleção é só espacial;
+        # a banda entra na leitura, para que um refino posterior numa banda mais
+        # larga não herde os fótons já cortados por um anterior.
         if self.state.source_event_list is None and self.state.source_region is not None:
-            self.source_events(band_ev=band_ev)
+            self.source_events()
         table = self.state.source_event_list or self.state.barycentered
         times = timing.read_arrival_times(table, band_ev=band_ev)
         refined = timing.refine_period(times, self.state.period_s,
@@ -597,7 +855,11 @@ class Pipeline:
         self.state.h_harmonics = harmonic
         self.state.pulsed_fraction = fraction
         self.state.pulsed_fraction_rms = rms
-        self._remember_timing()
+        self._remember_timing("z2_refine", {
+            "refine_band_ev": list(band_ev) if band_ev else None,
+            "refine_harmonics": harmonics, "refine_trials": trials,
+            "refine_span_fraction": span_fraction, "refine_events": str(table),
+            "refine_source_region": table == self.state.source_event_list})
         return refined
 
     def fold(self, phase_bins: int = 32) -> Path:
@@ -626,14 +888,34 @@ class Pipeline:
 
         Sem esta seleção o que se exporta é o campo inteiro, e o ajuste recebe
         fonte e fundo somados como se fossem a fonte.
+
+        A seleção é só espacial e fica em cache pela região e pela lista de
+        origem. ``band_ev`` é aceito por compatibilidade e ignorado aqui: quem
+        lê aplica a banda (``read_arrival_times``, ``pulsaris.write``). Cortar a
+        energia no arquivo fazia uma segunda leitura numa banda mais larga
+        herdar, sem aviso, os fótons já descartados pela primeira.
         """
         events = self._require_selected()
         table = self.state.barycentered or self.state.clean_events
         if table is None or self.state.source_region is None:
             raise RuntimeError("é preciso ter eventos filtrados e a região da fonte")
-        path = filtering.extract_region_events(
-            self.context, events, table, self.state.source_region.expression,
-            band_ev=band_ev)
+        region = self.state.source_region.expression
+        record = self.session.steps.get("source_events")
+        cached = self.state.source_event_list
+        if (cached is not None and cached.is_file() and record is not None
+                and record.status == "done"
+                and record.parameters.get("region") == region
+                and record.parameters.get("table") == str(table)):
+            return cached
+        self.session.begin("source_events", {"region": region, "table": str(table),
+                                             "band_ev": None})
+        try:
+            path = filtering.extract_region_events(self.context, events, table, region)
+        except Exception as error:
+            self.session.fail("source_events", str(error))
+            raise
+        self.session.step("source_events").parameters["output"] = str(path)
+        self.session.finish("source_events", outputs=[path])
         self.state.source_event_list = path
         return path
 
@@ -646,9 +928,14 @@ class Pipeline:
         if events_path is None or self.state.source_region is None:
             raise RuntimeError("é preciso ter eventos filtrados e regiões definidas")
 
+        prefix = events.product_prefix
+
         def work() -> spectra.Spectrum:
+            self._invalidate("spectra", "espectros refeitos")
+            self.state.source_spectrum = self.state.background_spectrum = None
             source = spectra.extract(self.context, events, events_path,
-                                     self.state.source_region.expression, name="src")
+                                     self.state.source_region.expression,
+                                     name=f"{prefix}_src")
             spectra.set_backscale(self.context, source, events_path)
 
             background = None
@@ -656,7 +943,7 @@ class Pipeline:
                 background = spectra.extract(
                     self.context, events, events_path,
                     self.state.background_region.expression,
-                    name="bkg", kind="background")
+                    name=f"{prefix}_bkg", kind="background")
                 spectra.set_backscale(self.context, background, events_path)
                 source.background = background.path
 
@@ -673,7 +960,12 @@ class Pipeline:
                                 message=f"{source.total_counts:.0f} contagens na fonte")
             return source
 
-        return self._run_step("spectra", work, {"group_min_counts": group_min_counts})
+        background_region = self.state.background_region
+        return self._run_step("spectra", work, {
+            "group_min_counts": group_min_counts, "instrument": events.instrument,
+            "exposure_id": events.exposure_id, "events": str(events_path),
+            "source_region": self.state.source_region.expression,
+            "background_region": background_region.expression if background_region else None})
 
     def extract_phase_spectra(self, phase_bins: int = 8) -> list[spectra.Spectrum]:
         """Espectroscopia resolvida em fase, a partir do período determinado."""
@@ -686,10 +978,13 @@ class Pipeline:
 
         background = (self.state.background_region.expression
                       if self.state.background_region else None)
+        average = self.state.source_spectrum
         result = spectra.phase_resolved(
             self.context, events, events_path, self.state.source_region.expression,
             period_s=self.state.period_s, phase_bins=phase_bins,
-            background_region=background)
+            background_region=background,
+            rmf=average.rmf if average else None, arf=average.arf if average else None,
+            ccd=_source_ccd(self.state.source_event_list))
         self.state.phase_spectra = result
         return result
 
@@ -699,6 +994,58 @@ class Pipeline:
         if self.state.selected is None:
             raise RuntimeError("selecione uma lista de eventos (câmera/exposição)")
         return self.state.selected
+
+
+def _source_ccd(path: Path | None) -> int | None:
+    """CCD onde está a fonte: o mais frequente entre os eventos da região."""
+    if path is None or not Path(path).is_file():
+        return None
+    try:
+        from astropy.io import fits
+
+        with fits.open(path, memmap=True) as hdus:
+            ccd = np.asarray(hdus["EVENTS"].data["CCDNR"], dtype=int)
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if ccd.size == 0:
+        return None
+    values, counts = np.unique(ccd, return_counts=True)
+    return int(values[np.argmax(counts)])
+
+
+def _calibration_valid(cif: Path, summary: Path) -> bool:
+    """Se o índice de calibração e o sumário do ODF são produtos íntegros.
+
+    O ``ccf.cif`` precisa abrir como FITS com a tabela CALINDEX preenchida; o
+    sumário precisa trazer o caminho do ODF e o registro da observação. Uma
+    escrita interrompida deixa arquivos que existem e não servem.
+    """
+    try:
+        from astropy.io import fits
+
+        with fits.open(cif, memmap=False) as hdus:
+            index = hdus["CALINDEX"].data
+            if index is None or len(index) == 0:
+                return False
+        text = summary.read_text(encoding="utf-8", errors="replace")
+    except (OSError, KeyError, ValueError, TypeError):
+        return False
+    return any(line.startswith("PATH ") for line in text.splitlines()) and "OBSERVATION" in text
+
+
+def _time_bin(path: Path) -> float | None:
+    """Largura do bin de uma curva, lida do cartão TIMEDEL do próprio arquivo."""
+    try:
+        from astropy.io import fits
+
+        with fits.open(path, memmap=True) as hdus:
+            for hdu in hdus[1:]:
+                value = hdu.header.get("TIMEDEL")
+                if value:
+                    return float(value)
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
 
 
 def _band_from_name(name: str) -> tuple[int, int]:

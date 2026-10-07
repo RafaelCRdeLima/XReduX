@@ -38,6 +38,8 @@ class BackgroundCurve:
     rate: np.ndarray
     instrument: str
     binsize_s: float
+    #: Prefixo dos produtos (câmera e exposição), para nomear o GTI.
+    prefix: str = ""
 
     def quiescent_level(self) -> float:
         """Taxa de fundo fora dos surtos.
@@ -117,7 +119,7 @@ def background_curve(context: TaskContext, events: EventList,
     band = f"PI>{low}" if high is None else f"PI>{low}&&PI<{high}"
     expression = selection_expression([events.quality_flag, band, "PATTERN==0"])
 
-    output = context.work_dir / f"{events.instrument.lower()}_bkg_rate.fits"
+    output = context.work_dir / f"{events.product_prefix}_bkg_rate.fits"
     context.sas(STEP_RATE, "evselect", {
         "table": f"{events.path}:EVENTS",
         "energycolumn": "PI",
@@ -130,7 +132,8 @@ def background_curve(context: TaskContext, events: EventList,
 
     time, rate = read_rate(output)
     return BackgroundCurve(path=output, time=time, rate=rate,
-                           instrument=events.instrument, binsize_s=binsize_s)
+                           instrument=events.instrument, binsize_s=binsize_s,
+                           prefix=events.product_prefix)
 
 
 def read_rate(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -147,7 +150,7 @@ def read_rate(path: Path) -> tuple[np.ndarray, np.ndarray]:
 def make_gti(context: TaskContext, curve: BackgroundCurve, threshold: float,
              output: Path | None = None) -> Path:
     """Gera o GTI com os intervalos abaixo do limiar de taxa."""
-    output = output or context.work_dir / f"{curve.instrument.lower()}_gti.fits"
+    output = output or context.work_dir / f"{curve.prefix or curve.instrument.lower()}_gti.fits"
     context.sas(STEP_GTI, "tabgtigen", {
         "table": curve.path, "gtiset": output,
         "expression": f"RATE<={threshold:g}",
@@ -164,7 +167,7 @@ def filter_events(context: TaskContext, events: EventList, gti: Path | None = No
     Mantém-se a banda ampla por padrão: restringir energia aqui inviabilizaria
     reutilizar a mesma lista para espectro e para timing em bandas diferentes.
     """
-    output = output or context.work_dir / f"{events.instrument.lower()}_clean.fits"
+    output = output or context.work_dir / f"{events.product_prefix}_clean.fits"
     parts = [
         events.quality_flag,
         "FLAG==0",

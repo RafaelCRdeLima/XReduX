@@ -121,6 +121,10 @@ class AcquisitionPage(Page):
         # O nome buscado é melhor rótulo que o alvo declarado no ODF, e a posição
         # é o que de fato agrupa as observações de uma mesma fonte.
         label = self._query.text().strip() or observation.target
+        if self.window.busy_page() is not None:
+            self.set_status(t("status.busy_elsewhere",
+                              step=t(f"step.{self.window.busy_page().key}")), "running")
+            return
         pipeline = self.window.ensure_pipeline(observation.obsid, label,
                                                observation.ra, observation.dec)
         if observation.ra is not None:
@@ -146,6 +150,10 @@ class AcquisitionPage(Page):
             return
         path = picker.chosen
         obsid = _guess_obsid(path)
+        if self.window.busy_page() is not None:
+            self.set_status(t("status.busy_elsewhere",
+                              step=t(f"step.{self.window.busy_page().key}")), "running")
+            return
         pipeline = self.window.ensure_pipeline(obsid, picker.chosen_source)
         try:
             pipeline.use_local_odf(path)
