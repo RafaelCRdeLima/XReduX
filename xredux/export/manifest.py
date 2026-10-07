@@ -63,7 +63,8 @@ def software() -> dict[str, Any]:
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,
             text=True, timeout=10, check=True).stdout.strip() or None
         status = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain", "--", "xredux", "tools"],
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no", "--",
+             "xredux", "tools"],
             capture_output=True, text=True, timeout=10, check=True).stdout
         record["xredux_dirty"] = bool(status.strip())
     except (OSError, subprocess.SubprocessError):
