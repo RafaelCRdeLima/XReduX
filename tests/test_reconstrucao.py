@@ -574,6 +574,43 @@ class PileupRecordTest(ExportFixture):
         self.assertEqual(document["pileup"]["verdict"], "clean")
 
 
+class RandomSeedTest(TemporaryDirectoryTest):
+    """Sem SAS_RAND_SEED o SAS semeia pelo relógio e o epproc sorteia diferente."""
+
+    def environment(self, variables=None):
+        from xredux.env import SasEnvironment
+
+        return SasEnvironment(variables=dict(variables or {}), sas_dir=self.directory,
+                              headas=self.directory, ccf_path=self.directory)
+
+    def test_seed_comes_from_the_obsid(self) -> None:
+        from xredux.env import rand_seed_for
+
+        self.assertEqual(rand_seed_for("0402850301"), 402850301)
+        self.assertEqual(rand_seed_for("0402850301"), rand_seed_for("0402850301"))
+        self.assertNotEqual(rand_seed_for("0402850301"), rand_seed_for("0402850401"))
+
+    def test_seed_goes_to_the_environment(self) -> None:
+        variables = self.environment().for_observation(self.directory, rand_seed=42)
+        self.assertEqual(variables["SAS_RAND_SEED"], "42")
+
+    def test_user_seed_prevails(self) -> None:
+        variables = self.environment({"SAS_RAND_SEED": "7"}).for_observation(
+            self.directory, rand_seed=42)
+        self.assertEqual(variables["SAS_RAND_SEED"], "7")
+
+    def test_session_keeps_the_seed_for_the_script(self) -> None:
+        from xredux.session import Session
+
+        session = Session(self.directory, "0402850301")
+        session.environment["SAS_RAND_SEED"] = "402850301"
+        session.save()
+        again = Session.load_or_create(self.directory, "0402850301")
+        self.assertEqual(again.environment, {"SAS_RAND_SEED": "402850301"})
+        self.assertIn("export SAS_RAND_SEED=402850301",
+                      again.write_script().read_text(encoding="utf-8"))
+
+
 class EpatplotPlotFailureTest(TemporaryDirectoryTest):
     """Só o desenho falhou: as razões que o epatplot imprimiu continuam medida."""
 

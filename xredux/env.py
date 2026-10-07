@@ -68,12 +68,19 @@ class SasEnvironment:
 
     def for_observation(self, work_dir: Path, ccf_cif: Path | None = None,
                         odf_dir: Path | None = None,
-                        sum_sas: Path | None = None) -> dict[str, str]:
+                        sum_sas: Path | None = None,
+                        rand_seed: int | None = None) -> dict[str, str]:
         """Ambiente específico de uma observação.
 
         Cada observação recebe seu próprio ``PFILES`` para que execuções
         simultâneas não disputem os arquivos de parâmetros do HEASoft — essa
         disputa é uma fonte clássica de resultados silenciosamente errados.
+
+        ``rand_seed`` vira ``SAS_RAND_SEED``. Sem ela o SAS semeia o gerador
+        global pelo relógio, e o ``epproc`` sorteia tempo dentro do quadro,
+        posição dentro do pixel e energia dentro do ADU de cada evento: duas
+        reduções idênticas davam listas de eventos diferentes. Uma semente
+        já exportada pelo usuário prevalece.
         """
         environment = dict(self.variables)
         pfiles = work_dir / "pfiles"
@@ -87,6 +94,8 @@ class SasEnvironment:
             environment["SAS_CCF"] = str(ccf_cif)
         if odf_dir is not None:
             environment["SAS_ODF"] = str(sum_sas if sum_sas is not None else odf_dir)
+        if rand_seed is not None and not environment.get("SAS_RAND_SEED"):
+            environment["SAS_RAND_SEED"] = str(int(rand_seed))
         environment["SAS_VERBOSITY"] = environment.get("SAS_VERBOSITY", "4")
         environment["SAS_SUPPRESS_WARNING"] = "1"
         return environment
@@ -192,3 +201,13 @@ def versions(environment: SasEnvironment) -> dict[str, str]:
 def current_shell_environment() -> dict[str, str]:
     """Cópia do ambiente atual, ponto de partida para execuções sem SAS."""
     return dict(os.environ)
+
+
+def rand_seed_for(obsid: str) -> int:
+    """Semente do SAS para uma observação: o próprio ObsID, quando numérico.
+
+    Fixa e derivável do dado — refazer a redução repete os sorteios do
+    ``epproc`` — e diferente entre observações.
+    """
+    digits = "".join(ch for ch in str(obsid) if ch.isdigit())
+    return int(digits) % 2_147_483_647 if digits else 1

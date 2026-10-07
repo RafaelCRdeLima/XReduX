@@ -407,6 +407,14 @@ Cada observação tem seu diretório em `products/<fonte>/<ObsID>/` com:
 
 Uma redução interrompida é retomada de onde parou; `epproc` não se refaz à toa.
 
+**Semente do SAS.** O `epproc` sorteia, para cada evento, o tempo dentro do
+quadro, a posição dentro do pixel e a energia dentro do ADU, com o gerador
+global do SAS — que, sem `SAS_RAND_SEED`, é semeado pelo relógio. Duas reduções
+idênticas davam listas diferentes (eventos que entram ou saem da região e da
+banda, período refinado diferente na quinta casa). O XreduX fixa
+`SAS_RAND_SEED` no ObsID (uma semente exportada pelo usuário prevalece), grava-a
+na sessão, no `reproduce.sh` e no manifesto.
+
 **Procedência.** Mudar uma entrada invalida o que dependia dela: trocar de
 câmera/exposição, refazer a filtragem, mudar as regiões, refazer o `barycen` ou
 extrair outra curva de luz descarta os produtos derivados em memória e marca as

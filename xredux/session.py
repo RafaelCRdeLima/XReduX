@@ -60,6 +60,9 @@ class Session:
         self.journal: list[dict[str, Any]] = []
         #: Cópia de um session.json ilegível, quando houve. A interface avisa.
         self.recovered_from: Path | None = None
+        #: Variáveis de ambiente que mudam o resultado (a semente do SAS) e
+        #: que o reproduce.sh precisa exportar.
+        self.environment: dict[str, str] = {}
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     # -- persistência -----------------------------------------------------
@@ -90,6 +93,7 @@ class Session:
             session.created_at = raw.get("created_at", session.created_at)
             session.schema = int(raw.get("schema", 1))
             session.journal = list(raw.get("journal") or [])
+            session.environment = dict(raw.get("environment") or {})
             for name, record in (raw.get("steps") or {}).items():
                 session.steps[name] = StepRecord(**record)
         return session
@@ -103,6 +107,7 @@ class Session:
             "updated_at": _now(),
             "steps": {name: asdict(record) for name, record in self.steps.items()},
             "journal": self.journal,
+            "environment": self.environment,
         }
         _write_atomically(self.path, json.dumps(payload, indent=2, ensure_ascii=False))
         self.write_script()
@@ -234,6 +239,8 @@ class Session:
             "set -euo pipefail",
             "",
         ]
+        lines += [f"export {key}={shlex.quote(str(value))}"
+                  for key, value in sorted(self.environment.items())]
         if self.journal:
             lines += self._script_from_journal()
         else:

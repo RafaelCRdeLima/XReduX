@@ -1322,7 +1322,8 @@ class Pipeline:
                          "datamode": events.mode, "submode": events.submode,
                          "filter": events.filter_name, "ra_deg": state.ra,
                          "dec_deg": state.dec},
-            "software": manifest_export.software(),
+            "software": {**manifest_export.software(),
+                         "sas_rand_seed": self.context.env.get("SAS_RAND_SEED")},
             "session": {"path": str(self.session.path),
                         "reproduce": str(self.session.work_dir / "reproduce.sh")},
             "time_reference": reference.as_dict(),
@@ -1483,6 +1484,11 @@ def build_context(settings: Settings, session: Session,
     from . import env as sas_env
 
     environment = sas_env.build(settings)
-    variables = environment.for_observation(session.work_dir)
+    variables = environment.for_observation(
+        session.work_dir, rand_seed=sas_env.rand_seed_for(session.obsid))
+    # A semente vai para a sessão e para o reproduce.sh: sem ela o script não
+    # repete os sorteios do epproc.
+    if variables.get("SAS_RAND_SEED"):
+        session.environment["SAS_RAND_SEED"] = variables["SAS_RAND_SEED"]
     return TaskContext(runner=ProcessRunner(on_line=on_line), env=variables,
                        session=session, work_dir=session.work_dir)
