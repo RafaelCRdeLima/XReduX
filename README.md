@@ -257,14 +257,19 @@ duas exposições do pn se sobrescreverem:
 | `<conjunto>_manifest.json` | identidade, procedência, contagens, verificações e SHA-256 de cada arquivo |
 | `profile/` | perfil pronto para **instalar** no PULSARIS |
 
-**Exposição por fase.** `G_k` são os segundos de GTI com fase no bin `k`, na
-mesma escala, período e época dos eventos (intervalos unidos antes; ciclos
-parciais e passagem pela fase zero contados exatamente), e
-`E_k = exposure_s · G_k / ΣG`. O tempo morto entra uma vez, em `exposure_s`
-(`p ×` LIVETIME do CCD da fonte); a fração viva é tratada como constante no
-tempo — aproximação declarada no arquivo. A soma reproduz `exposure_s`, e a
-diferença entre ΣG (TDB) e o ONTIME do CCD (tempo local, ~10⁻⁴) vai ao
-cabeçalho; acima de 10⁻³ a exportação é recusada.
+**Exposição por fase.** Na mesma escala, período e época dos eventos
+(intervalos unidos antes; ciclos parciais e passagem pela fase zero contados
+exatamente). A coluna principal, `exposure_s`, distribui o tempo vivo como o
+SAS o monta: `FRACEXP·TIMEDEL` de cada quadro da extensão `EXPOSUnn` do CCD da
+fonte, espalhado sobre o ciclo do quadro, cortado pela GTI e somado por bin
+(`E_k = exposure_s · L_k / ΣL`). A coluna `exposure_gti_s` é a receita pela
+GTI com fração viva constante (`E_k = exposure_s · G_k / ΣG`), que vira a
+principal, declarada, quando a lista não tem `EXPOSUnn`. O tempo morto entra
+uma vez, em `exposure_s` (`p ×` LIVETIME do CCD da fonte). A soma reproduz
+`exposure_s`; ΣG (TDB) é conferida contra o ONTIME do CCD (tempo local, ~10⁻⁴)
+e ΣL contra o LIVETIME, e acima de 10⁻³ a exportação é recusada. Na
+0402850301 o FRACEXP varia de 0,86 a 1,00, e a amplitude em fase da exposição
+sai 0,65% por quadro contra 0,49% pela GTI.
 
 O manifesto é conferido ao reabrir a sessão: um arquivo exportado que mudou ou
 sumiu deixa a etapa `export` desatualizada. Mudar exposição, filtragem,

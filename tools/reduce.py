@@ -155,9 +155,12 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
            f"{report_csv.events_available} eventos · exposição "
            f"{report_csv.exposure_s:.3f} s · {report_csv.size_bytes / 1e6:.1f} MB")
     if exported.phase is not None:
-        report(f"exposição por fase: {exported.phase.path.name} · soma "
-               f"{exported.phase.exposure_s.sum():.3f} s · GTI/ONTIME − 1 = "
-               f"{exported.phase.gti_ontime_relative:.2e}")
+        phase = exported.phase
+        report(f"exposição por fase ({phase.method}): {phase.path.name} · soma "
+               f"{phase.exposure_s.sum():.3f} s · GTI/ONTIME − 1 = "
+               f"{phase.gti_ontime_relative:.2e}"
+               + (f" · tempo vivo por quadro/LIVETIME − 1 = {phase.frame_live_relative:.2e}"
+                  if phase.frame_live_relative is not None else ""))
     report(f"manifesto: {exported.manifest.name}")
     for message in exported.warnings:
         warn(message)

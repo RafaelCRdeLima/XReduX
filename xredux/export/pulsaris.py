@@ -34,6 +34,8 @@ PHASE_EXPOSURE_BINS = 32
 #: ONTIME do mesmo CCD (em tempo local). A conversão de escala muda durações
 #: por ~v/c ≈ 10⁻⁴; acima de 10⁻³ a GTI escolhida não é a que gerou o ONTIME.
 GTI_ONTIME_TOLERANCE = 1.0e-3
+#: Idem para a soma do tempo vivo quadro a quadro contra o LIVETInn.
+FRAME_LIVETIME_TOLERANCE = 1.0e-3
 #: Limite de upload do servidor do PULSARIS (``server.py``: ``MAX_EVENT_UPLOAD``).
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 #: Custo médio por linha do CSV, medido nos arquivos de exemplo do PULSARIS.
@@ -377,6 +379,13 @@ class PhaseExposure:
     livetime_s: float
     gti_ontime_relative: float
     metadata: dict[str, object] = field(default_factory=dict)
+    #: ``frame_livetime`` (tempo vivo quadro a quadro) ou ``gti_constant_live_fraction``.
+    method: str = "gti_constant_live_fraction"
+    #: A receita da GTI com fração viva constante, sempre calculada, para comparar.
+    exposure_gti_s: np.ndarray | None = None
+    #: Tempo vivo quadro a quadro por bin, antes da normalização.
+    frame_live_s: np.ndarray | None = None
+    frame_live_relative: float | None = None
 
 
 def write_phase_exposure(output: Path, *, good_time,
@@ -385,26 +394,30 @@ def write_phase_exposure(output: Path, *, good_time,
                          ontime_s: float, livetime_s: float,
                          decimation_probability: float = 1.0,
                          bins: int = PHASE_EXPOSURE_BINS, events_file: str = "",
-                         set_id: str = "", gti_file: Path | None = None) -> PhaseExposure:
+                         set_id: str = "", gti_file: Path | None = None,
+                         frames=None) -> PhaseExposure:
     """Escreve a exposição efetiva por bin de fase.
 
-    Receita, na mesma convenção de tempo, período e época do CSV de eventos:
+    Convenção de tempo, período e época idêntica à do CSV de eventos:
+    ``t`` = tempo menos ``time_origin_s`` (mesmo arquivo, mesma escala) e
+    fase = ``frac((t − phase_reference_s)/period_s)``. Duas receitas:
 
-    * ``t`` = tempo da GTI menos ``time_origin_s`` (mesmo arquivo, mesma escala);
-    * fase = ``frac((t − phase_reference_s)/period_s)``;
-    * ``G_k`` = segundos de GTI com fase no bin ``k`` (intervalos unidos antes,
-      ciclos parciais e a passagem pela fase zero contados exatamente);
-    * ``E_k = exposure_total_s · G_k / ΣG``.
+    * **por quadro** (``frames``, a extensão ``EXPOSUnn``; é a principal
+      quando existe): ``L_k`` = tempo vivo ``FRACEXP·TIMEDEL`` de cada quadro,
+      espalhado sobre o ciclo do quadro, cortado pela GTI do CCD e somado por
+      bin de fase; ``E_k = exposure_total_s · L_k / ΣL``. É assim que o SAS
+      monta o LIVETIME, então a distribuição em fase é a dele;
+    * **pela GTI** (sempre calculada, coluna ``exposure_gti_s``): ``G_k`` =
+      segundos de GTI no bin, ``E_k = exposure_total_s · G_k / ΣG`` — supõe
+      fração viva constante, que é a aproximação quando não há ``EXPOSUnn``.
 
-    ``exposure_total_s`` é a do CSV (``p ×`` tempo vivo do CCD da fonte), e a
-    correção de tempo morto entra uma vez só, nela. **Aproximação declarada**:
-    a fração viva (LIVETIME/ONTIME) é tratada como constante ao longo da
-    observação — o SAS não a distribui no tempo —, assim como a razão entre
-    durações em TDB e em tempo local. A diferença relativa entre ΣG e o ONTIME
-    do CCD vai ao cabeçalho; acima de ``GTI_ONTIME_TOLERANCE`` nada é escrito,
-    porque a GTI não seria a que gerou a exposição.
+    Em ambas, intervalos são unidos antes, e ciclos parciais e a passagem pela
+    fase zero entram exatamente. ``exposure_total_s`` é a do CSV (``p ×``
+    tempo vivo do CCD da fonte), e o tempo morto entra uma vez só, nela.
+    ΣG é conferida contra o ONTIME do CCD e ΣL contra o LIVETIME; acima das
+    tolerâncias nada é escrito.
     """
-    from ..tasks.spectra import phase_coverage_s
+    from ..tasks.spectra import phase_coverage_s, phase_frame_live_s
 
     if not (period_s and period_s > 0.0):
         raise ValueError("período inválido para a exposição por fase")
@@ -428,7 +441,27 @@ def write_phase_exposure(output: Path, *, good_time,
         raise ValueError(f"exposição total {exposure_total_s:.6f} s não é p × tempo vivo "
                          f"do CCD ({decimation_probability:.9g} × {livetime_s:.6f} s): "
                          "a correção de tempo morto estaria duplicada ou ausente")
-    exposure = exposure_total_s * coverage / total
+    exposure_gti = exposure_total_s * coverage / total
+    method, frame_live, frame_relative = "gti_constant_live_fraction", None, None
+    exposure = exposure_gti
+    if frames is not None:
+        if frames.timesys and frames.timesys != reference.timesys:
+            raise ValueError(f"{frames.extension} em {frames.timesys} e eventos em "
+                             f"{reference.timesys}: escalas diferentes")
+        shifted = type(frames)(start=frames.start - reference.origin_s,
+                               live_s=frames.live_s, cycle_s=frames.cycle_s,
+                               timedel_s=frames.timedel_s, extension=frames.extension,
+                               timesys=frames.timesys)
+        frame_live = phase_frame_live_s(shifted, intervals, period_s, phase_reference_s,
+                                        edges)
+        frame_relative = float(frame_live.sum() / livetime_s - 1.0)
+        if abs(frame_relative) > FRAME_LIVETIME_TOLERANCE:
+            raise ValueError(
+                f"o tempo vivo quadro a quadro de {frames.extension} soma "
+                f"{frame_live.sum():.3f} s no tempo bom e o LIVETIME do CCD é "
+                f"{livetime_s:.3f} s (diferença relativa {frame_relative:.2e})")
+        exposure = exposure_total_s * frame_live / frame_live.sum()
+        method = "frame_livetime"
     if not math.isclose(float(exposure.sum()), exposure_total_s, rel_tol=1e-9):
         raise ValueError("a exposição por fase não soma a exposição total")
 
@@ -445,10 +478,25 @@ def write_phase_exposure(output: Path, *, good_time,
         "decimation_probability": f"{decimation_probability:.9g}",
         "exposure_total_s": f"{exposure_total_s:.6f}",
         "exposure_sum_s": f"{exposure.sum():.6f}",
-        "recipe": "E_k = exposure_total_s * G_k / sum(G); G_k = segundos de GTI com fase "
-                  "no bin k; exposure_total_s = decimation_probability * livetime_ccd_s",
-        "approximation": "fração viva LIVETIME/ONTIME constante no tempo; razão entre "
-                         "durações em timesys e em tempo local constante",
+        "method": method,
+        "recipe": (
+            "exposure_s: E_k = exposure_total_s * L_k / sum(L); L_k = tempo vivo "
+            "FRACEXP*TIMEDEL de cada quadro de frame_extension, espalhado sobre "
+            "[TIME, TIME + frame_cycle_s), cortado pela GTI e somado por bin de fase. "
+            if method == "frame_livetime" else "exposure_s = exposure_gti_s. ")
+        + "exposure_gti_s: E_k = exposure_total_s * G_k / sum(G); G_k = segundos de GTI "
+          "com fase no bin k. exposure_total_s = decimation_probability * livetime_ccd_s",
+        "approximation": (
+            "tempo vivo uniforme dentro de cada quadro; a coluna exposure_gti_s supõe "
+            "fração viva constante" if method == "frame_livetime" else
+            "fração viva LIVETIME/ONTIME constante no tempo (sem EXPOSUnn na lista); "
+            "razão entre durações em timesys e em tempo local constante"),
+        "frame_extension": frames.extension if frames is not None else "",
+        "frame_cycle_s": f"{frames.cycle_s:.9f}" if frames is not None else "",
+        "frame_timedel_s": f"{frames.timedel_s:.9f}" if frames is not None else "",
+        "frame_live_sum_s": f"{frame_live.sum():.6f}" if frame_live is not None else "",
+        "frame_live_vs_livetime_relative": (f"{frame_relative:.3e}"
+                                            if frame_relative is not None else ""),
         "gti_file": Path(gti_file).name if gti_file else "",
         "produced_by": "XREDUX",
     }
@@ -458,16 +506,21 @@ def write_phase_exposure(output: Path, *, good_time,
         for key, value in metadata.items():
             if value not in (None, ""):
                 stream.write(f"# {key}={value}\n")
-        stream.write("phase_low,phase_high,gti_s,exposure_s\n")
-        for low, high, seconds, effective in zip(edges[:-1], edges[1:], coverage, exposure):
-            stream.write(f"{low:.6f},{high:.6f},{seconds:.6f},{effective:.6f}\n")
+        stream.write("phase_low,phase_high,gti_s,frame_live_s,exposure_gti_s,exposure_s\n")
+        live_column = frame_live if frame_live is not None else np.full(bins, np.nan)
+        for low, high, seconds, live, by_gti, effective in zip(
+                edges[:-1], edges[1:], coverage, live_column, exposure_gti, exposure):
+            stream.write(f"{low:.6f},{high:.6f},{seconds:.6f},{live:.6f},{by_gti:.6f},"
+                         f"{effective:.6f}\n")
 
     return PhaseExposure(path=output, gti_path=Path(gti_file) if gti_file else None,
                          edges=edges,
                          gti_s=coverage, exposure_s=exposure,
                          exposure_total_s=float(exposure_total_s), gti_total_s=total,
                          ontime_s=ontime_s, livetime_s=livetime_s,
-                         gti_ontime_relative=mismatch, metadata=metadata)
+                         gti_ontime_relative=mismatch, metadata=metadata, method=method,
+                         exposure_gti_s=exposure_gti, frame_live_s=frame_live,
+                         frame_live_relative=frame_relative)
 
 
 def write_background(source_spectrum: Path, background_spectrum: Path, rmf: Path,

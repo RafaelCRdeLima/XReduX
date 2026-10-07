@@ -455,6 +455,90 @@ def phase_coverage_s(intervals: np.ndarray, period_s: float, epoch_s: float,
     return coverage * period_s
 
 
+@dataclass
+class FrameExposure:
+    """Tempo vivo quadro a quadro de um CCD, da extensão ``EXPOSUnn`` do SAS.
+
+    Cada linha é um quadro: ``TIME`` é o início dele e ``FRACEXP`` a fração
+    exposta do tempo de integração ``TIMEDEL``. O ``LIVETInn`` do cabeçalho é
+    a soma de ``FRACEXP·TIMEDEL`` sobre os quadros no tempo bom — então é
+    esta tabela, e não a GTI pura, que diz como o tempo vivo se distribui no
+    tempo. O ``FRACEXP`` varia (0,86 a 1,00 na 0402850301), e uma fração viva
+    constante não vê isso.
+    """
+
+    start: np.ndarray
+    live_s: np.ndarray
+    cycle_s: float
+    timedel_s: float
+    extension: str
+    timesys: str = ""
+
+
+def frame_exposure(events_path: Path, ccd: int) -> FrameExposure | None:
+    """A tabela ``EXPOSUnn`` do CCD, ou ``None`` se a lista não a tiver.
+
+    O ciclo do quadro (início a início) é medido nos próprios dados: o ``epproc``
+    sorteia o tempo de cada evento ao longo do ciclo inteiro, não só do tempo de
+    integração, e é sobre esse intervalo que o tempo vivo do quadro é espalhado.
+    """
+    from astropy.io import fits
+
+    name = f"EXPOSU{ccd:02d}"
+    with fits.open(events_path, memmap=True) as hdus:
+        if name not in hdus or hdus[name].data is None or len(hdus[name].data) < 2:
+            return None
+        header = hdus[name].header
+        start = np.asarray(hdus[name].data["TIME"], dtype=float)
+        fraction = np.asarray(hdus[name].data["FRACEXP"], dtype=float)
+        timedel = header.get("TIMEDEL")
+        timesys = str(header.get("TIMESYS") or "").strip().upper()
+    if not timedel or not float(timedel) > 0.0:
+        raise ValueError(f"{name} de {Path(events_path).name} não traz TIMEDEL")
+    order = np.argsort(start, kind="stable")
+    start, fraction = start[order], fraction[order]
+    cycle = float(np.median(np.diff(start)))
+    if not cycle > 0.0:
+        raise ValueError(f"{name}: ciclo de quadro não positivo")
+    return FrameExposure(start=start, live_s=fraction * float(timedel), cycle_s=cycle,
+                         timedel_s=float(timedel), extension=name, timesys=timesys)
+
+
+def phase_frame_live_s(frames: FrameExposure, good: np.ndarray, period_s: float,
+                       epoch_s: float, edges: np.ndarray, chunk: int = 50_000) -> np.ndarray:
+    """Segundos de tempo vivo em cada intervalo de fase, quadro a quadro.
+
+    O tempo vivo de cada quadro é espalhado uniformemente sobre
+    ``[TIME, TIME + ciclo)``, cortado pelos intervalos de ``good`` (a GTI do
+    CCD da fonte), e cada pedaço é distribuído em fase pela mesma função
+    acumulada de :func:`phase_coverage_s`. ``good``, ``frames.start`` e
+    ``epoch_s`` precisam estar na mesma escala e origem.
+    """
+    edges = np.asarray(edges, dtype=float)
+    density = frames.live_s / frames.cycle_s
+    stop = frames.start + frames.cycle_s
+    live = np.zeros(len(edges) - 1)
+    for low, high in merge_intervals(good):
+        chosen = np.nonzero((frames.start < high) & (stop > low))[0]
+        for begin in range(0, chosen.size, chunk):
+            index = chosen[begin:begin + chunk]
+            a = np.maximum(frames.start[index], low)
+            b = np.minimum(stop[index], high)
+            share = (_cycles_in_bins_many((b - epoch_s) / period_s, edges)
+                     - _cycles_in_bins_many((a - epoch_s) / period_s, edges))
+            live += (density[index, None] * share).sum(axis=0) * period_s
+    return live
+
+
+def _cycles_in_bins_many(cycles: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """:func:`_cycles_in_bins` para um vetor de ciclos: uma linha por valor."""
+    low, high = edges[:-1], edges[1:]
+    cycles = np.asarray(cycles, dtype=float)[:, None]
+    whole = np.floor(cycles)
+    partial = cycles - whole
+    return whole * (high - low) + (np.clip(partial, low, high) - low)
+
+
 def phase_exposure_fractions(events_path: Path, frequency_hz: float, epoch_s: float,
                              edges: np.ndarray, ccd: int | None = None) -> np.ndarray:
     """Fração do tempo bom passada em cada intervalo de fase ``edges``."""

@@ -37,7 +37,7 @@ T0 = 2.66e8
 def write_list(path: Path, times, *, pi=None, ccd=4, tstart=T0, tstop=None,
                timesys="TDB", timeref="SOLARSYSTEM", instrument="EPN", exposure="S003",
                submode="PrimeLargeWindow", frmtime=48, stdgti=None, filter_gti=None,
-               ontime=None, livetime=None) -> Path:
+               ontime=None, livetime=None, frames=None) -> Path:
     """Lista de eventos com os cartões e as GTIs por CCD de uma lista do pn.
 
     ``stdgti`` e ``filter_gti`` mapeiam CCD → intervalos; a GTI de filtragem
@@ -82,6 +82,15 @@ def write_list(path: Path, times, *, pi=None, ccd=4, tstart=T0, tstop=None,
         hdus.append(gti(f"STDGTI{chip:02d}", intervals))
     for chip, intervals in (filter_gti or {}).items():
         hdus.append(gti(f"GTI{chip - 1:03d}05", intervals, chip))
+    # Tempo vivo quadro a quadro, como na EXPOSUnn do SAS: (inícios, FRACEXP, TIMEDEL).
+    for chip, (starts, fraction, timedel) in (frames or {}).items():
+        hdu = fits.BinTableHDU.from_columns([
+            fits.Column(name="TIME", format="D", array=np.asarray(starts, dtype=float)),
+            fits.Column(name="FRACEXP", format="E", array=np.asarray(fraction, dtype=float))],
+            name=f"EXPOSU{chip:02d}")
+        hdu.header["TIMEDEL"] = timedel
+        hdu.header["TIMESYS"] = timesys
+        hdus.append(hdu)
     fits.HDUList(hdus).writeto(path, overwrite=True)
     return path
 
@@ -276,7 +285,8 @@ class PhaseExposureTableTest(TemporaryDirectoryTest):
         self.assertTrue(np.allclose(table.exposure_s, 0.9 * PhaseCoverageTest.EXPECTED))
         self.assertAlmostEqual(table.exposure_s.sum(), 0.9 * 11.5, places=9)
         rows = rows_of(table.path)
-        self.assertTrue(np.allclose(rows[:, 3].sum(), 0.9 * 11.5, atol=1e-5))
+        self.assertTrue(np.allclose(rows[:, 5].sum(), 0.9 * 11.5, atol=1e-5))
+        self.assertEqual(table.method, "gti_constant_live_fraction")
         header = metadata_of(table.path)
         for key in ("recipe", "approximation", "live_fraction", "gti_vs_ontime_relative",
                     "time_origin_s", "timesys", "period_s", "phase_reference_s"):
@@ -299,6 +309,74 @@ class PhaseExposureTableTest(TemporaryDirectoryTest):
                                  extensions=["STDGTI04"], timesys="TT")
         with self.assertRaises(ValueError):
             self.table(good_time=other)
+
+
+class FrameLivetimeTest(TemporaryDirectoryTest):
+    """Tempo vivo quadro a quadro: FRACEXP que varia com a fase muda a exposição."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Quadros de 1 s (integração 0,9 s) de 0 a 100 s; P = 10 s. Os quadros
+        # na primeira metade da fase têm FRACEXP 1,0, os da segunda, 0,5.
+        starts = np.arange(100.0)
+        fraction = np.where(np.mod(starts, 10.0) < 5.0, 1.0, 0.5)
+        self.live = float(np.sum(fraction * 0.9))  # 67,5 s
+        self.path = write_list(self.directory / "e.fits", [T0 + 1.0], tstart=T0,
+                               stdgti={4: [(T0, T0 + 100.0)]},
+                               filter_gti={4: [(T0, T0 + 100.0)]},
+                               frames={4: (T0 + starts, fraction, 0.9)})
+        self.good = spectra.source_gti(self.path, 4)
+        self.reference = reference_from_events(self.path)
+
+    def table(self, **overrides):
+        parameters = dict(good_time=self.good, reference=self.reference, period_s=10.0,
+                          phase_reference_s=0.0, exposure_total_s=self.live,
+                          ontime_s=100.0, livetime_s=self.live, bins=2,
+                          frames=spectra.frame_exposure(self.path, 4))
+        parameters.update(overrides)
+        return pulsaris.write_phase_exposure(self.directory / "fase.csv", **parameters)
+
+    def test_frames_are_read_with_their_cycle(self) -> None:
+        frames = spectra.frame_exposure(self.path, 4)
+        self.assertAlmostEqual(frames.cycle_s, 1.0)
+        self.assertAlmostEqual(frames.live_s.sum(), self.live)
+        self.assertIsNone(spectra.frame_exposure(self.path, 5))
+
+    def test_known_solution(self) -> None:
+        table = self.table()
+        self.assertEqual(table.method, "frame_livetime")
+        self.assertTrue(np.allclose(table.frame_live_s, [45.0, 22.5]), table.frame_live_s)
+        self.assertTrue(np.allclose(table.exposure_s, [45.0, 22.5]))
+        # A receita da GTI, que supõe fração viva constante, divide meio a meio.
+        self.assertTrue(np.allclose(table.exposure_gti_s, [33.75, 33.75]))
+        rows = rows_of(table.path)
+        self.assertTrue(np.allclose(rows[:, 3], [45.0, 22.5]))
+        self.assertTrue(np.allclose(rows[:, 4], [33.75, 33.75]))
+        self.assertTrue(np.allclose(rows[:, 5], [45.0, 22.5]))
+        header = metadata_of(table.path)
+        self.assertEqual(header["method"], "frame_livetime")
+        self.assertEqual(header["frame_extension"], "EXPOSU04")
+
+    def test_decimation_keeps_the_shape(self) -> None:
+        table = self.table(exposure_total_s=0.5 * self.live, decimation_probability=0.5)
+        self.assertTrue(np.allclose(table.exposure_s, [22.5, 11.25]))
+
+    def test_gti_cuts_frames(self) -> None:
+        # Sem os primeiros 20 s, os quadros cortados saem das duas metades.
+        path = write_list(self.directory / "c.fits", [T0 + 1.0], tstart=T0,
+                          stdgti={4: [(T0 + 20.0, T0 + 100.0)]},
+                          filter_gti={4: [(T0, T0 + 100.0)]},
+                          frames={4: (T0 + np.arange(100.0),
+                                      np.where(np.mod(np.arange(100.0), 10.0) < 5.0, 1.0, 0.5),
+                                      0.9)})
+        good = spectra.source_gti(path, 4)
+        table = self.table(good_time=good, ontime_s=80.0, livetime_s=54.0,
+                           exposure_total_s=54.0, frames=spectra.frame_exposure(path, 4))
+        self.assertTrue(np.allclose(table.frame_live_s, [36.0, 18.0]))
+
+    def test_livetime_that_does_not_match_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            self.table(livetime_s=80.0, exposure_total_s=80.0)
 
 
 # ---------------------------------------------------------------------------

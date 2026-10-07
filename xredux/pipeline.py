@@ -1212,12 +1212,17 @@ class Pipeline:
                                       set_id=set_id, events_file=report.path.name)
             phase = None
             if state.period_s:
+                frames = spectra.frame_exposure(state.barycentered, ccd)
+                if frames is None:
+                    warnings.append(f"sem EXPOSU{ccd:02d}: a exposição por fase supõe fração "
+                                    "viva constante (declarado no arquivo)")
                 phase = pulsaris_export.write_phase_exposure(
                     names["phase"], good_time=good, reference=reference,
                     period_s=float(state.period_s), phase_reference_s=0.0,
                     exposure_total_s=report.exposure_s, ontime_s=ontime, livetime_s=livetime,
                     decimation_probability=report.decimation_probability, bins=phase_bins,
-                    events_file=report.path.name, set_id=set_id, gti_file=names["gti"])
+                    events_file=report.path.name, set_id=set_id, gti_file=names["gti"],
+                    frames=frames)
             else:
                 warnings.append("sem período: a exposição por fase não foi calculada")
             for key, response in (("rmf", spectrum.rmf), ("arf", spectrum.arf)):
@@ -1352,6 +1357,14 @@ class Pipeline:
                          "live_fraction": livetime / ontime, "gti_total_s": good.total_s,
                          "exposure_csv_s": report.exposure_s,
                          "phase_exposure_s": (phase.exposure_s.tolist() if phase else None),
+                         "phase_exposure_method": phase.method if phase else None,
+                         "phase_exposure_gti_s": (phase.exposure_gti_s.tolist()
+                                                  if phase else None),
+                         "phase_frame_live_s": (phase.frame_live_s.tolist()
+                                                if phase is not None
+                                                and phase.frame_live_s is not None else None),
+                         "frame_live_vs_livetime_relative": (phase.frame_live_relative
+                                                             if phase else None),
                          "phase_gti_s": (phase.gti_s.tolist() if phase else None)},
             "barycentric_correction": {
                 "ra_deg": state.ra, "dec_deg": state.dec,
