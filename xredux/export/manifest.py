@@ -33,10 +33,31 @@ def file_entry(path: Path | str | None, role: str, **details: Any) -> dict[str, 
             "size_bytes": path.stat().st_size, "sha256": sha256(path), **details}
 
 
+def source_fingerprint(root: Path | None = None) -> str:
+    """SHA-256 do código-fonte do XreduX (``xredux/**/*.py`` e ``tools/*.py``).
+
+    Identifica a versão mesmo onde não há ``.git`` — no contêiner só as
+    pastas de código são montadas — e denuncia uma árvore editada que o
+    commit sozinho não mostraria. Conta o caminho relativo e o conteúdo.
+    """
+    import hashlib
+
+    root = root or Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    files = sorted([*root.glob("xredux/**/*.py"), *root.glob("tools/*.py")])
+    for path in files:
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def software() -> dict[str, Any]:
-    """Versão do XreduX (commit do git) e dos pacotes externos em uso."""
+    """Versão do XreduX (commit do git e hash do código) e dos pacotes externos."""
     root = Path(__file__).resolve().parents[2]
-    record: dict[str, Any] = {"xredux_commit": None, "xredux_dirty": None}
+    record: dict[str, Any] = {"xredux_commit": None, "xredux_dirty": None,
+                              "xredux_source_sha256": source_fingerprint(root)}
     try:
         record["xredux_commit"] = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True,

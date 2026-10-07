@@ -222,8 +222,9 @@ def main() -> int:
     started = time.monotonic()
     from xredux.export import manifest as manifest_export
     version = manifest_export.software()
-    report(f"XreduX {version.get('xredux_commit') or 'sem commit'}"
-           + (" (com alterações não commitadas)" if version.get("xredux_dirty") else ""))
+    report(f"XreduX {version.get('xredux_commit') or 'sem git'}"
+           + (" (com alterações não commitadas)" if version.get("xredux_dirty") else "")
+           + f" · código {version['xredux_source_sha256'][:16]}")
     pipeline = Pipeline(settings, session,
                         build_context(settings, session,
                                       on_line=lambda line: print("  " + line, flush=True)))
