@@ -197,7 +197,11 @@ def collect(state, session, settings) -> tuple[Observation, Software]:
                       submode=getattr(events, "submode", "") or "",
                       filter_name=getattr(events, "filter_name", ""))
     if events is not None:
-        resolution = events.time_resolution_us()
+        try:
+            resolution = events.time_resolution_us()
+        except ValueError:
+            # Desconhecida fica de fora do texto (sai como ??), não vira número.
+            resolution = None
         log.frame_time_ms = resolution / 1000.0 if resolution else None
         if events.ontime_s:
             log.exposure_ks = events.ontime_s / 1000.0

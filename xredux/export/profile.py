@@ -141,6 +141,9 @@ def build(pulsaris_root: Path, output_dir: Path, identifier: str, label: str,
           target: str = "", obsid: str = "",
           source_url: str = "https://www.cosmos.esa.int/web/xmm-newton") -> ProfileBundle:
     """Constrói o par ``.csv`` + ``.rmfbin`` do perfil a partir de ARF e RMF reais."""
+    if time_resolution_us is None or not float(time_resolution_us) > 0.0:
+        raise ProfileError(f"resolução temporal inválida ({time_resolution_us!r} µs) "
+                           f"para o perfil '{identifier}'")
     builder = load_pulsaris_builder(pulsaris_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -293,7 +296,13 @@ def _read_manifest(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def identifier_for(obsid: str, instrument: str, mode: str = "") -> str:
-    """Identificador estável de perfil para uma observação e câmera."""
-    parts = ["xmm", instrument.lower(), mode.lower(), obsid]
+def identifier_for(obsid: str, instrument: str, mode: str = "", exposure: str = "") -> str:
+    """Identificador estável de perfil para uma observação, câmera e exposição.
+
+    A exposição entra porque ARF e RMF são dela: duas exposições do pn no
+    mesmo submodo, na mesma observação, davam o mesmo identificador, e a
+    instalação de uma trocava em silêncio a resposta da outra.
+    """
+    exposure = "".join(ch for ch in exposure.lower() if ch.isalnum())
+    parts = ["xmm", instrument.lower(), mode.lower(), obsid, exposure]
     return "_".join(part for part in parts if part)

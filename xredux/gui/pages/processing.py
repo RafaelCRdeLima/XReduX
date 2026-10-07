@@ -77,7 +77,7 @@ class ProcessingPage(Page):
                 values = [
                     item.instrument, item.mode or "—", item.filter_name or "—",
                     f"{item.ontime_s / 1000:.1f}" if item.ontime_s else "—",
-                    f"{item.time_resolution_us():g}",
+                    _resolution_text(item),
                 ]
                 for column, value in enumerate(values):
                     self._table.setItem(index, column, QTableWidgetItem(value))
@@ -117,3 +117,11 @@ class ProcessingPage(Page):
             t("column.instrument"), t("column.mode"), t("column.filter"),
             t("column.ontime_ks"), t("column.time_resolution_us"),
         ])
+
+
+def _resolution_text(events) -> str:
+    """Resolução da exposição para a tabela; desconhecida aparece como tal."""
+    try:
+        return f"{events.time_resolution_us():g}"
+    except ValueError:
+        return "?"

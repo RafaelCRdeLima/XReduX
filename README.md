@@ -171,11 +171,27 @@ independentemente dos outros. Um processo de Poisson desbastado assim continua
 de Poisson, com taxa `p·λ`, então o CSV declara a exposição **efetiva**
 `exposure_s = p × LIVETIME`, e o fundo, que o ajuste multiplica pela mesma
 exposição, fica coerente. O cabeçalho traz `decimation_probability`,
-`decimation_seed`, `events_before_decimation` e `livetime_full_s`. A origem dos
-tempos é o `TSTART` da lista (`time_origin_s`, com `timesys` e `mjdref`), fixada
-antes do corte de banda e da decimação: trocar a banda ou a semente não desloca
-a fase. Eventos com energia fora da grade de canais da RMF ficam de fora, com
-aviso; sem RMF não há exportação, porque a coluna `PI` é o canal da resposta.
+`decimation_seed`, `events_before_decimation` e `livetime_full_s`. Eventos com
+energia fora da grade de canais da RMF ficam de fora, com aviso; sem RMF não há
+exportação, porque a coluna `PI` é o canal da resposta.
+
+**Referência temporal.** A origem dos tempos é o `TSTART` da lista
+baricentrada da exposição inteira, fixado antes do corte de região, de banda e
+do desbaste. O cabeçalho do CSV traz a referência completa — `time_origin_s`,
+`time_origin_mjd`, `timesys`, `timeref`, `mjdref` (e `mjdrefi`/`mjdreff`),
+`timezero`, `timeunit` e o arquivo de origem com o SHA-256 — e, separados dela,
+`period_s`, `phase_reference_s` (época contada a partir da origem),
+`phase_epoch_mission_s`, `phase_epoch_mjd` e a convenção
+`fase = frac((TIME − phase_reference_s)/period_s)`. Uma lista em outra escala
+ou referencial (TT contra TDB, LOCAL contra SOLARSYSTEM) é recusada: tempos em
+escalas diferentes não se subtraem. Até a versão anterior a origem era o
+primeiro evento já filtrado; mudar para o `TSTART` desloca a fase absoluta dos
+produtos antigos e **não** corrige, por si, alinhamentos feitos sobre eles.
+
+**Resolução temporal.** Vem do `SUBMODE` pela tabela do manual, conferida
+contra o `FRMTIME` do cabeçalho nos modos de imagem, e vai ao CSV com unidade e
+procedência (`time_resolution_from`). Submodo desconhecido, zero ou ausente é
+erro: não há mais reserva pelo `DATAMODE`.
 
 ## Validação em RX J1856.5-3754
 
@@ -224,15 +240,40 @@ nos harmônicos que o fundamental ignora.
 
 ## O que sai para o PULSARIS
 
-A aba de Exportação escreve, em `products/<fonte>/<ObsID>/pulsaris/`:
+A aba de Exportação e o `tools/reduce.py --export` passam pelo mesmo
+`Pipeline.export_products` e escrevem, em `products/<fonte>/<ObsID>/pulsaris/`,
+um **conjunto** por exposição, com o prefixo `<fonte>_<ObsID>_<inst>_<exposição>`
+(por exemplo `RXJ1308.6_2127_0402850301_epn_s003`) — só a câmera no nome fazia
+duas exposições do pn se sobrescreverem:
 
 | arquivo | o que é |
 |---|---|
-| `<fonte>_<ObsID>_<inst>_events.csv` | tempos baricentrados, PI e energia da região da fonte |
-| `<fonte>_<ObsID>_<inst>_background.csv` | fundo escalado pelo BACKSCAL |
-| `<fonte>_<ObsID>_<inst>.arf` | área efetiva da observação, do `arfgen` |
-| `<fonte>_<ObsID>_<inst>.rmf` | matriz de redistribuição, do `rmfgen` |
+| `<conjunto>_events.csv` | tempos baricentrados, PI e energia da região da fonte |
+| `<conjunto>_gti.csv` | GTIs do CCD da fonte (`STDGTInn` ∩ GTI da filtragem do mesmo CCD), a partir da origem |
+| `<conjunto>_phase_exposure.csv` | exposição efetiva por bin de fase (32 bins), com a receita |
+| `<conjunto>_background.csv` | fundo escalado pelo BACKSCAL |
+| `<conjunto>.arf`, `<conjunto>.rmf` | área efetiva e redistribuição da exposição |
+| `<conjunto>_regions.json` | regiões de fonte e fundo (expressão e geometria) |
+| `<conjunto>_manifest.json` | identidade, procedência, contagens, verificações e SHA-256 de cada arquivo |
 | `profile/` | perfil pronto para **instalar** no PULSARIS |
+
+**Exposição por fase.** `G_k` são os segundos de GTI com fase no bin `k`, na
+mesma escala, período e época dos eventos (intervalos unidos antes; ciclos
+parciais e passagem pela fase zero contados exatamente), e
+`E_k = exposure_s · G_k / ΣG`. O tempo morto entra uma vez, em `exposure_s`
+(`p ×` LIVETIME do CCD da fonte); a fração viva é tratada como constante no
+tempo — aproximação declarada no arquivo. A soma reproduz `exposure_s`, e a
+diferença entre ΣG (TDB) e o ONTIME do CCD (tempo local, ~10⁻⁴) vai ao
+cabeçalho; acima de 10⁻³ a exportação é recusada.
+
+O manifesto é conferido ao reabrir a sessão: um arquivo exportado que mudou ou
+sumiu deixa a etapa `export` desatualizada. Mudar exposição, filtragem,
+regiões, correção baricêntrica, espectros ou o período também a invalida.
+
+O diagnóstico de empilhamento fica registrado na etapa `pileup` da sessão
+(lista, região, GTI da filtragem, expressão de seleção, razões, núcleo e asas)
+com desfecho `measured`, `unmeasured` ou `inconclusive`; falha de execução fica
+`failed`. Nenhum desses vira "limpo" por ausência de medida.
 
 Tudo o que está solto em `pulsaris/` é entrada: abre-se no PULSARIS. O que está
 em `profile/` instala-se e nunca se abre — a distinção existe porque as duas

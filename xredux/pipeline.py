@@ -9,6 +9,7 @@ interrompida no meio pode ser retomada de onde parou.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,7 +18,8 @@ import numpy as np
 from .config import Settings
 from .runner import ProcessRunner, TaskFailed
 from .session import Session
-from .tasks import acquisition, calibration, epic, filtering, om, regions, rgs, spectra, timing
+from .tasks import (absorption, acquisition, calibration, epic, filtering, om, regions,
+                    rgs, spectra, timing)
 from .tasks.base import TaskContext, newest
 from .tasks.epic import EventList
 from .tasks.regions import Region
@@ -157,27 +159,30 @@ class Pipeline:
              "corrected_light_curve", "period_s", *_TIMING_RESULTS_STATE,
              "source_spectrum", "background_spectrum", "phase_spectra",
              "exported_csv", "profile_bundle"),
-            ("filtering", "timing", "source_events", "lightcurve", "period_search",
-             "spectra")),
+            ("filtering", "pileup", "timing", "source_events", "lightcurve",
+             "period_search", "spectra", "export")),
+        # O empilhamento é medido no tempo bom da filtragem, então ela entra.
         "filtering": (
-            ("barycentered", "source_event_list", "light_curve", "corrected_light_curve",
-             "period_s", *_TIMING_RESULTS_STATE, "source_spectrum",
-             "background_spectrum", "phase_spectra", "exported_csv", "profile_bundle"),
-            ("timing", "source_events", "lightcurve", "period_search", "spectra")),
+            ("barycentered", "source_event_list", "pileup", "pileup_plot", "light_curve",
+             "corrected_light_curve", "period_s", *_TIMING_RESULTS_STATE,
+             "source_spectrum", "background_spectrum", "phase_spectra", "exported_csv",
+             "profile_bundle"),
+            ("pileup", "timing", "source_events", "lightcurve", "period_search", "spectra",
+             "export")),
         "regions": (
             ("source_event_list", "pileup", "pileup_plot", "light_curve",
              "corrected_light_curve", "period_s", *_TIMING_RESULTS_STATE,
              "source_spectrum", "background_spectrum", "phase_spectra",
              "exported_csv", "profile_bundle"),
-            ("source_events", "lightcurve", "period_search", "spectra")),
+            ("pileup", "source_events", "lightcurve", "period_search", "spectra", "export")),
         "timing": (
             ("source_event_list", "light_curve", "corrected_light_curve", "period_s",
              *_TIMING_RESULTS_STATE, "phase_spectra", "exported_csv", "profile_bundle"),
-            ("source_events", "lightcurve", "period_search")),
+            ("source_events", "lightcurve", "period_search", "export")),
         # Uma curva nova não invalida o período como candidato digitado ou já
         # achado, mas invalida tudo o que foi medido sobre a curva anterior.
         "lightcurve": ((*_TIMING_RESULTS_STATE,), ("period_search",)),
-        "spectra": (("phase_spectra", "exported_csv", "profile_bundle"), ()),
+        "spectra": (("phase_spectra", "exported_csv", "profile_bundle"), ("export",)),
     }
 
     def _invalidate(self, change: str, reason: str) -> list[str]:
@@ -332,10 +337,48 @@ class Pipeline:
                                         else self.state.background_curve.suggested_threshold())
 
         self._restore_regions()
+        self._restore_pileup()
         self._restore_source_events()
         self._restore_timing()
         self._restore_spectra()
+        restored += self._verify_export()
         return restored
+
+    def _restore_pileup(self) -> None:
+        """A medida de empilhamento, se foi feita nesta região e nesta exposição."""
+        record = self.session.steps.get("pileup")
+        region, selected = self.state.source_region, self.state.selected
+        if (record is None or record.status != "done" or region is None
+                or selected is None):
+            return
+        parameters = record.parameters
+        if (parameters.get("region") != region.expression
+                or parameters.get("events") != str(selected.path)
+                or not parameters.get("result")):
+            return
+        self.state.pileup = epic.PileupCheck.from_record(parameters["result"])
+        self.state.pileup_plot = self.state.pileup.plot
+
+    def _verify_export(self) -> list[str]:
+        """Confere, pelo manifesto, se o que foi exportado ainda é o que está no disco.
+
+        Um CSV editado, apagado ou substituído depois da exportação deixa de
+        ser o produto desta redução, e a etapa passa a ``stale``.
+        """
+        from .export import manifest as manifest_export
+
+        record = self.session.steps.get("export")
+        if record is None or record.status != "done":
+            return []
+        path = record.parameters.get("manifest")
+        if not path or not Path(path).is_file():
+            self.session.invalidate(["export"], "manifesto da exportação ausente")
+            return ["exportação marcada como desatualizada: manifesto ausente"]
+        problems = manifest_export.verify(Path(path), kinds=("output",))
+        if problems:
+            self.session.invalidate(["export"], "; ".join(problems))
+            return [f"exportação marcada como desatualizada: {problems[0]}"]
+        return ["exportação conferida pelo manifesto"]
 
     def _recorded_selection(self, events: list[EventList]) -> EventList | None:
         """A exposição escolhida da última vez, se ainda estiver entre as listas."""
@@ -644,10 +687,36 @@ class Pipeline:
         return regions.default_regions(events)
 
     def check_pileup(self) -> "epic.PileupCheck":
+        """Diagnostica empilhamento e registra na sessão o que foi — ou não — medido.
+
+        A etapa ``pileup`` guarda a lista, a região, a GTI, a expressão de
+        seleção e o resultado inteiro (razões, núcleo e asas, final da saída
+        do epatplot). O desfecho é ``measured``, ``unmeasured`` ou
+        ``inconclusive``; falha de execução deixa a etapa ``failed``. Nenhum
+        deles vira "limpo" por ausência: limpo é só o veredito ``clean`` de
+        uma medida.
+        """
         events = self._require_selected()
-        if self.state.source_region is None:
+        region = self.state.source_region
+        if region is None:
             raise RuntimeError("defina a região da fonte antes de checar empilhamento")
-        check = epic.check_pileup(self.context, events, self.state.source_region)
+        gti = self.state.gti if self.state.clean_events is not None else None
+        self.state.pileup = self.state.pileup_plot = None
+        self.session.begin("pileup", {
+            "events": str(events.path), "instrument": events.instrument,
+            "exposure_id": events.exposure_id, "region": region.expression,
+            "region_description": region.description,
+            "gti": str(gti) if gti else None, "threshold": self.state.threshold})
+        try:
+            check = epic.check_pileup(self.context, events, region, gti=gti)
+        except Exception as error:
+            self.session.fail("pileup", str(error))
+            raise
+        record = check.as_record()
+        self.session.step("pileup").parameters.update({
+            "result": record, "outcome": record["outcome"], "verdict": record["verdict"]})
+        self.session.finish("pileup", outputs=[check.plot],
+                            message=f"{record['outcome']}: {record['verdict']}")
         self.state.pileup = check
         self.state.pileup_plot = check.plot
         return check
@@ -796,6 +865,12 @@ class Pipeline:
         record.parameters["methods"] = methods
         record.parameters.update(details or {})
         self.session.finish("period_search")
+        # A exposição por fase e a época exportadas dependem do período.
+        exported = self.session.steps.get("export")
+        if (exported is not None and exported.status == "done"
+                and exported.parameters.get("period_s") != self.state.period_s):
+            self.state.exported_csv = None
+            self.session.invalidate(["export"], "período alterado depois da exportação")
 
     def _confirm(self, period_s: float) -> None:
         """Confere o pico do efsearch contra os tempos de chegada não binados.
@@ -988,6 +1063,307 @@ class Pipeline:
         self.state.phase_spectra = result
         return result
 
+    # -- H. exportação ----------------------------------------------------
+
+    def set_identifier(self) -> str:
+        """Nome do conjunto exportado: fonte, ObsID, câmera e exposição.
+
+        Só a câmera não basta — duas exposições do pn na mesma observação
+        escreviam o mesmo CSV, e a segunda apagava a primeira.
+        """
+        from .archive import file_stem
+
+        events = self._require_selected()
+        return f"{file_stem(self.state.target, self.state.obsid)}_{events.product_prefix}"
+
+    def profile_identifier(self) -> str:
+        """Identificador do perfil de instrumento deste conjunto."""
+        from .export import profile as profile_export
+
+        events = self._require_selected()
+        return profile_export.identifier_for(self.state.obsid, events.instrument,
+                                             events.submode or events.mode,
+                                             events.exposure_id)
+
+    def export_products(self, output_dir: Path | None = None,
+                        band_ev: tuple[int, int] = (150, 1200),
+                        max_events: int | None = None, seed: int = 1234,
+                        phase_bins: int | None = None,
+                        galactic_column: bool = True) -> "ExportedSet":
+        """Exporta o conjunto da exposição para o PULSARIS/MAGNUS, com manifesto.
+
+        Escreve, com o mesmo prefixo (:meth:`set_identifier`): a lista de
+        eventos da região da fonte, as GTIs do CCD da fonte, a exposição por
+        fase (se houver período), a tabela de fundo, cópias da RMF e do ARF, as
+        regiões e o manifesto que liga tudo pelo hash. A interface e a linha de
+        comando passam por aqui; antes cada uma tinha a sua exportação, com
+        nomes e chaves diferentes.
+
+        A origem dos tempos é fixada no ``TSTART`` da lista baricentrada antes
+        de qualquer corte, e a exposição é o tempo vivo do CCD da fonte.
+        """
+        import shutil
+
+        from .export import manifest as manifest_export
+        from .export import pulsaris as pulsaris_export
+        from .timebase import reference_from_events
+
+        state = self.state
+        events = self._require_selected()
+        if state.barycentered is None:
+            raise RuntimeError("é preciso ter eventos baricentrados para exportar")
+        if state.source_region is None:
+            raise RuntimeError("defina a região da fonte antes de exportar")
+        spectrum = state.source_spectrum
+        if spectrum is None or spectrum.rmf is None or spectrum.arf is None:
+            raise RuntimeError("gere os espectros antes de exportar: o CSV declara os "
+                               "canais da RMF, e o conjunto leva RMF e ARF")
+        resolution = events.time_resolution()
+        phase_bins = phase_bins or pulsaris_export.PHASE_EXPOSURE_BINS
+        set_id, profile_id = self.set_identifier(), self.profile_identifier()
+        directory = Path(output_dir) if output_dir else self.work_dir / "pulsaris"
+        background_region = state.background_region
+        parameters = {
+            "set_id": set_id, "profile_id": profile_id, "directory": str(directory),
+            "band_ev": list(band_ev), "max_events": max_events, "seed": seed,
+            "phase_bins": phase_bins, "period_s": state.period_s,
+            "events": str(state.barycentered), "instrument": events.instrument,
+            "exposure_id": events.exposure_id,
+            "source_region": state.source_region.expression,
+            "background_region": background_region.expression if background_region else None,
+            "spectrum": str(spectrum.path)}
+
+        def work() -> ExportedSet:
+            self.state.exported_csv = None
+            warnings: list[str] = []
+            source = self.source_events()
+            reference = reference_from_events(state.barycentered)
+            ccd, share = _source_ccd_share(source)
+            if ccd is None:
+                raise RuntimeError("nenhum evento na região da fonte para achar o CCD")
+            if share < 0.99:
+                warnings.append(f"só {share:.1%} dos eventos da região estão no CCD {ccd}; "
+                                "GTI e tempo vivo são os dele")
+            good = spectra.source_gti(state.barycentered, ccd)
+            ontime, livetime = pulsaris_export.ccd_exposure(state.barycentered, ccd)
+
+            names = {key: directory / f"{set_id}{suffix}" for key, suffix in (
+                ("events", "_events.csv"), ("gti", "_gti.csv"),
+                ("phase", "_phase_exposure.csv"), ("background", "_background.csv"),
+                ("rmf", ".rmf"), ("arf", ".arf"), ("regions", "_regions.json"),
+                ("manifest", "_manifest.json"))}
+            directory.mkdir(parents=True, exist_ok=True)
+
+            extra: dict[str, object] = {
+                "set_id": set_id, "profile_id": profile_id, "camera": events.instrument,
+                "exposure_id": events.exposure_id, "filter": events.filter_name,
+                **{key: value for key, value in resolution.metadata().items()
+                   if key != "time_resolution_us"},
+                "source_ccd": ccd, "source_ccd_event_fraction": f"{share:.6f}",
+                "ontime_ccd_s": f"{ontime:.6f}", "livetime_ccd_s": f"{livetime:.6f}",
+                "gti_file": names["gti"].name, "manifest_file": names["manifest"].name,
+                "response_arf": names["arf"].name,
+            }
+            if state.period_s:
+                extra["phase_exposure_file"] = names["phase"].name
+                methods = (self.session.steps.get("period_search").parameters.get("methods")
+                           if "period_search" in self.session.steps else None)
+                extra["period_from"] = ",".join(methods or []) or "informado"
+            if galactic_column and state.ra is not None and state.dec is not None:
+                column = absorption.galactic_column(self.context, state.ra, state.dec)
+                if column is not None:
+                    # "nh" é o nome curto que o PULSARIS lê; o longo diz que é
+                    # limite superior (a coluna galáctica inteira).
+                    extra["nh"] = f"{column.nh_1e22:.6g}"
+                    extra["nh_galactic_upper_1e22"] = f"{column.nh_1e22:.6g}"
+                    extra["nh_survey"] = column.survey
+                else:
+                    warnings.append("a ferramenta nh do HEASoft não respondeu")
+            background_csv = None
+            if state.background_spectrum is not None:
+                background_csv = pulsaris_export.write_background(
+                    spectrum.path, state.background_spectrum.path, spectrum.rmf,
+                    names["background"], band_ev=band_ev)
+                extra["background_file"] = background_csv.name
+            else:
+                warnings.append("sem espectro de fundo: o ajuste atribuirá todo evento à fonte")
+
+            # O cabeçalho da lista da região deve dizer o mesmo tempo vivo; se
+            # não disser, o que vale é o do CCD, e a diferença fica registrada.
+            header_live = pulsaris_export._live_time(epic.read_header(source))
+            if header_live is not None and not np.isclose(header_live, livetime, rtol=1e-6):
+                warnings.append(f"LIVETIME da lista da região ({header_live:.3f} s) difere do "
+                                f"LIVETI{ccd:02d} ({livetime:.3f} s); vale o do CCD")
+
+            report = pulsaris_export.write(
+                source, names["events"], instrument=profile_id,
+                time_resolution_us=resolution.value_us, obsid=state.obsid,
+                target=state.target, period_s=state.period_s, exposure_s=livetime,
+                band_ev=band_ev, rmf=spectrum.rmf, region=state.source_region.description,
+                extra=extra, max_events=max_events, seed=seed, time_reference=reference)
+            warnings += report.warnings
+            self.session.record_action("export", f"CSV {report.path.name} escrito pelo XreduX: "
+                                       f"{report.events_written} de {report.events_available} "
+                                       "eventos" + (f", decimado com semente {seed}"
+                                                    if report.decimated else ""))
+            pulsaris_export.write_gti(names["gti"], good_time=good, reference=reference,
+                                      set_id=set_id, events_file=report.path.name)
+            phase = None
+            if state.period_s:
+                phase = pulsaris_export.write_phase_exposure(
+                    names["phase"], good_time=good, reference=reference,
+                    period_s=float(state.period_s), phase_reference_s=0.0,
+                    exposure_total_s=report.exposure_s, ontime_s=ontime, livetime_s=livetime,
+                    decimation_probability=report.decimation_probability, bins=phase_bins,
+                    events_file=report.path.name, set_id=set_id, gti_file=names["gti"])
+            else:
+                warnings.append("sem período: a exposição por fase não foi calculada")
+            for key, response in (("rmf", spectrum.rmf), ("arf", spectrum.arf)):
+                shutil.copy2(response, names[key])
+                self.session.record_action("export", f"{Path(response).name} copiado para "
+                                           f"{names[key].name}",
+                                           shell=["cp", "-p", str(response), str(names[key])])
+            names["regions"].write_text(json.dumps({
+                "source": {"expression": state.source_region.expression,
+                           "kind": state.source_region.kind,
+                           "description": state.source_region.description,
+                           "geometry": state.source_region.geometry},
+                "background": None if background_region is None else {
+                    "expression": background_region.expression,
+                    "kind": background_region.kind,
+                    "description": background_region.description,
+                    "geometry": background_region.geometry},
+                "coordinates": "X/Y do céu (SAS), em unidades de 0,05 segundo de arco"},
+                indent=2, ensure_ascii=False), encoding="utf-8")
+
+            outputs = [report.path, names["gti"], names["rmf"], names["arf"], names["regions"]]
+            outputs += [path for path in (phase.path if phase else None, background_csv) if path]
+            payload = self._manifest_payload(
+                set_id=set_id, profile_id=profile_id, report=report, reference=reference,
+                resolution=resolution, phase=phase, good=good, ccd=ccd, share=share,
+                ontime=ontime, livetime=livetime, header_live=header_live,
+                band_ev=band_ev, max_events=max_events, seed=seed, source=source,
+                outputs=outputs, warnings=warnings)
+            manifest_export.write(names["manifest"], payload)
+            self.state.exported_csv = report.path
+            record = self.session.step("export")
+            record.parameters.update({"manifest": str(names["manifest"]),
+                                      "csv": str(report.path),
+                                      "exposure_s": report.exposure_s,
+                                      "time_origin_s": reference.origin_s})
+            self.session.finish("export", outputs=outputs + [names["manifest"]],
+                                message=f"{set_id}: {report.events_written} eventos")
+            return ExportedSet(set_id=set_id, profile_id=profile_id, directory=directory,
+                               report=report, phase=phase, gti=names["gti"],
+                               background=background_csv, rmf=names["rmf"], arf=names["arf"],
+                               regions=names["regions"], manifest=names["manifest"],
+                               warnings=warnings)
+
+        return self._run_step("export", work, parameters)
+
+    def _manifest_payload(self, *, set_id, profile_id, report, reference, resolution,
+                          phase, good, ccd, share, ontime, livetime, header_live,
+                          band_ev, max_events, seed, source, outputs, warnings) -> dict:
+        """O conteúdo do manifesto: identidade, procedência, contagens e verificações."""
+        from dataclasses import asdict
+
+        from .export import manifest as manifest_export
+
+        state, events = self.state, self.state.selected
+        spectrum = state.source_spectrum
+        filtering_record = self.session.steps.get("filtering")
+        pileup_record = self.session.steps.get("pileup")
+        epoch = reference.origin_s
+        files = [
+            manifest_export.file_entry(events.path, "events_raw", kind="input"),
+            manifest_export.file_entry(state.gti, "gti_flare_filter", kind="input"),
+            manifest_export.file_entry(state.clean_events, "events_clean", kind="input"),
+            manifest_export.file_entry(state.barycentered, "events_barycentered",
+                                       kind="input", time_origin=True),
+            manifest_export.file_entry(source, "events_source_region", kind="input"),
+            manifest_export.file_entry(spectrum.path, "spectrum_source", kind="input"),
+            manifest_export.file_entry(state.background_spectrum.path
+                                       if state.background_spectrum else None,
+                                       "spectrum_background", kind="input"),
+            manifest_export.file_entry(spectrum.rmf, "rmf", kind="input"),
+            manifest_export.file_entry(spectrum.arf, "arf", kind="input"),
+            manifest_export.file_entry(spectrum.grouped, "spectrum_source_grouped",
+                                       kind="input"),
+            manifest_export.file_entry(state.pileup_plot, "pileup_plot", kind="input"),
+        ]
+        roles = {report.path: "csv_events", (phase.path if phase else None): "csv_phase_exposure"}
+        for path in outputs:
+            role = roles.get(path) or {".rmf": "rmf_copy", ".arf": "arf_copy"}.get(
+                Path(path).suffix) or Path(path).name.replace(f"{set_id}_", "").split(".")[0]
+            files.append(manifest_export.file_entry(path, role, kind="output"))
+        checks = {
+            "phase_exposure_sum_equals_total": (
+                None if phase is None else bool(np.isclose(phase.exposure_s.sum(),
+                                                           report.exposure_s, rtol=1e-9))),
+            "gti_vs_ontime_relative": (phase.gti_ontime_relative if phase is not None
+                                       else (good.total_s - ontime) / ontime),
+            "csv_exposure_equals_p_times_livetime": bool(np.isclose(
+                report.exposure_s, report.decimation_probability * livetime, rtol=1e-9)),
+            "region_list_livetime_s": header_live,
+            "time_resolution_positive": resolution.value_us > 0.0,
+        }
+        return {
+            "set_id": set_id,
+            "profile_id": profile_id,
+            "identity": {"obsid": state.obsid, "target": state.target,
+                         "instrument": events.instrument, "exposure_id": events.exposure_id,
+                         "datamode": events.mode, "submode": events.submode,
+                         "filter": events.filter_name, "ra_deg": state.ra,
+                         "dec_deg": state.dec},
+            "software": manifest_export.software(),
+            "session": {"path": str(self.session.path),
+                        "reproduce": str(self.session.work_dir / "reproduce.sh")},
+            "time_reference": reference.as_dict(),
+            "time_resolution": asdict(resolution),
+            "phase": {"period_s": state.period_s, "phase_reference_s": 0.0,
+                      "phase_epoch_mission_s": epoch,
+                      "phase_epoch_mjd": reference.to_mjd(epoch),
+                      "frequency_derivative": 0.0,
+                      "convention": "phase = frac((TIME - phase_reference_s) / period_s)",
+                      "period_search": (self.session.steps["period_search"].parameters
+                                        if "period_search" in self.session.steps else None)},
+            "selection": {"band_ev": list(band_ev),
+                          "source_region": state.source_region.expression,
+                          "background_region": (state.background_region.expression
+                                                if state.background_region else None),
+                          "flare_filter": (filtering_record.parameters
+                                           if filtering_record else None),
+                          "source_ccd": ccd, "source_ccd_event_fraction": share,
+                          "gti_extensions": good.extensions},
+            "counts": {"events_in_region_list": report.events_in_file,
+                       "events_in_band": report.events_available + report.events_outside_grid,
+                       "events_outside_response_grid": report.events_outside_grid,
+                       "events_available": report.events_available,
+                       "events_written": report.events_written},
+            "exposure": {"ontime_ccd_s": ontime, "livetime_ccd_s": livetime,
+                         "live_fraction": livetime / ontime, "gti_total_s": good.total_s,
+                         "exposure_csv_s": report.exposure_s,
+                         "phase_exposure_s": (phase.exposure_s.tolist() if phase else None),
+                         "phase_gti_s": (phase.gti_s.tolist() if phase else None)},
+            "barycentric_correction": {
+                "ra_deg": state.ra, "dec_deg": state.dec,
+                "timeref": reference.timeref, "timesys": reference.timesys,
+                "step": (self.session.steps["timing"].parameters
+                         if "timing" in self.session.steps else None)},
+            "sampling": {"decimated": report.decimated, "method": (
+                "bernoulli" if report.decimated else None),
+                         "probability": report.decimation_probability,
+                         "seed": seed if report.decimated else None,
+                         "max_events": max_events},
+            "pileup": ({"status": pileup_record.status, **pileup_record.parameters}
+                       if pileup_record is not None else {"status": "not_run"}),
+            "files": [entry for entry in files if entry],
+            "checks": checks,
+            "warnings": warnings,
+            "commands": [entry for entry in self.session.journal
+                         if entry.get("kind") == "command"],
+        }
+
     # -- interno ----------------------------------------------------------
 
     def _require_selected(self) -> EventList:
@@ -996,21 +1372,45 @@ class Pipeline:
         return self.state.selected
 
 
+@dataclass
+class ExportedSet:
+    """O que :meth:`Pipeline.export_products` escreveu."""
+
+    set_id: str
+    profile_id: str
+    directory: Path
+    report: object
+    phase: object | None
+    gti: Path
+    background: Path | None
+    rmf: Path
+    arf: Path
+    regions: Path
+    manifest: Path
+    warnings: list[str] = field(default_factory=list)
+
+
 def _source_ccd(path: Path | None) -> int | None:
     """CCD onde está a fonte: o mais frequente entre os eventos da região."""
+    return _source_ccd_share(path)[0]
+
+
+def _source_ccd_share(path: Path | None) -> tuple[int | None, float]:
+    """CCD mais frequente entre os eventos da região, e a fração deles nele."""
     if path is None or not Path(path).is_file():
-        return None
+        return None, 0.0
     try:
         from astropy.io import fits
 
         with fits.open(path, memmap=True) as hdus:
             ccd = np.asarray(hdus["EVENTS"].data["CCDNR"], dtype=int)
     except (OSError, KeyError, ValueError, TypeError):
-        return None
+        return None, 0.0
     if ccd.size == 0:
-        return None
+        return None, 0.0
     values, counts = np.unique(ccd, return_counts=True)
-    return int(values[np.argmax(counts)])
+    best = int(np.argmax(counts))
+    return int(values[best]), float(counts[best] / ccd.size)
 
 
 def _calibration_valid(cif: Path, summary: Path) -> bool:

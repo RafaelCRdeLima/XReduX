@@ -379,12 +379,12 @@ class EventListTest(unittest.TestCase):
         self.assertEqual(mos.max_pattern, 12)
 
     def test_time_resolution_reflects_the_mode(self) -> None:
-        self.assertAlmostEqual(
-            EventList(Path("a"), "EPN", "TIMING").time_resolution_us(), 29.52)
-        self.assertAlmostEqual(
-            EventList(Path("a"), "EPN", "BURST").time_resolution_us(), 7.0)
-        self.assertGreater(
-            EventList(Path("a"), "EPN", "IMAGING").time_resolution_us(), 1000.0)
+        self.assertAlmostEqual(EventList(Path("a"), "EPN", "TIMING", submode="PrimeTiming")
+                               .time_resolution_us(), 29.52)
+        self.assertAlmostEqual(EventList(Path("a"), "EPN", "BURST", submode="PrimeBurst")
+                               .time_resolution_us(), 7.0)
+        self.assertGreater(EventList(Path("a"), "EPN", "IMAGING", submode="PrimeFullWindow")
+                           .time_resolution_us(), 1000.0)
 
     def test_submode_decides_the_resolution(self) -> None:
         """Small Window e Full Frame são ambos IMAGING e diferem por 13x."""
@@ -404,9 +404,15 @@ class EventListTest(unittest.TestCase):
             EventList(Path("a"), "EMOS2", "TIMING",
                       submode="FastUncompressed").time_resolution_us(), 1_750.0)
 
-    def test_unknown_mode_falls_back_to_imaging(self) -> None:
-        resolution = EventList(Path("a"), "EPN", "ESQUISITO").time_resolution_us()
-        self.assertAlmostEqual(resolution, 73_400.0)
+    def test_unknown_submode_is_an_error_not_a_default(self) -> None:
+        """A reserva antiga dava 73,4 ms a qualquer modo desconhecido."""
+        from xredux.tasks.epic import UnknownTimeResolution
+
+        for events in (EventList(Path("a"), "EPN", "ESQUISITO"),
+                       EventList(Path("a"), "EPN", "IMAGING"),
+                       EventList(Path("a"), "EPN", "IMAGING", submode="Inventado")):
+            with self.assertRaises(UnknownTimeResolution):
+                events.time_resolution_us()
 
 
 class BackgroundThresholdTest(unittest.TestCase):

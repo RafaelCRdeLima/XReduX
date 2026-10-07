@@ -38,6 +38,7 @@ def write_events(path: Path, count: int = 5_000, seed: int = 7) -> None:
     ])
     hdu = fits.BinTableHDU.from_columns(columns, name="EVENTS")
     hdu.header["TIMEREF"] = "SOLARSYSTEM"
+    hdu.header["TIMESYS"] = "TDB"
     hdu.header["MJDREF"] = 50814.0
     hdu.header["TSTART"] = float(time[0])
     hdu.header["EXPOSURE"] = 20_000.0

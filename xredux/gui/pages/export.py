@@ -13,7 +13,6 @@ from ...export import pulsaris as pulsaris_export
 from ...archive import file_stem
 from ...export import latex as latex_export
 from ...i18n import t
-from ...tasks import absorption
 from .base import Page, row
 
 
@@ -105,115 +104,57 @@ class ExportPage(Page):
         if spectrum is None or spectrum.rmf is None:
             self.set_status(t("export.need_response"), "failed")
             return
-        state = pipeline.state
-        events = state.selected
         band = (self._low.value(), self._high.value())
         maximum = pulsaris_export.max_events_for_upload() if self._limit.isChecked() else None
-        # O nome da fonte entra no arquivo: um CSV solto chamado só pelo ObsID
-        # não diz de que objeto é quando chega ao ajuste, meses depois.
-        # Em pulsaris/, junto do fundo: é a pasta que o usuário abre quando vai
-        # procurar "os dados exportados para o PULSARIS", e achar só o perfil do
-        # instrumento ali leva a selecionar o arquivo errado — que falha com uma
-        # mensagem que parece a dica de sempre.
-        stem = file_stem(state.target, state.obsid)
-        directory = pipeline.work_dir / "pulsaris"
-        directory.mkdir(parents=True, exist_ok=True)
-        output = directory / f"{stem}_{events.instrument.lower()}_events.csv"
-        rmf = state.source_spectrum.rmf if state.source_spectrum else None
-        region = state.source_region.description if state.source_region else ""
 
         def work():
-            # A exportação parte dos eventos da região da fonte, não do campo
-            # inteiro: exportar a lista limpa entregaria fonte e fundo somados.
-            source = pipeline.source_events(band_ev=band)
-
-            # Coluna galáctica pela ferramenta nh do HEASoft. É limite superior
-            # para uma fonte dentro da Galáxia, e vai rotulada como tal.
-            extra: dict[str, object] = {}
-            if state.ra is not None and state.dec is not None:
-                column = absorption.galactic_column(pipeline.context,
-                                                    state.ra, state.dec)
-                if column is not None:
-                    # Duas chaves de propósito: "nh" é o nome curto que o
-                    # PULSARIS lê, e o longo diz o que o número é — limite
-                    # superior, por ser a coluna galáctica inteira.
-                    extra["nh"] = f"{column.nh_1e22:.6g}"
-                    extra["nh_galactic_upper_1e22"] = f"{column.nh_1e22:.6g}"
-                    extra["nh_survey"] = column.survey
-
-            # Tabela de fundo escalada pelo BACKSCAL, para o ajuste não creditar
-            # à estrela as contagens que são do céu e do detector.
-            if state.background_spectrum is not None and state.source_spectrum \
-                    is not None and rmf is not None:
-                background = output.with_name(
-                    output.stem.replace("_events", "") + "_background.csv")
-                pulsaris_export.write_background(
-                    state.source_spectrum.path, state.background_spectrum.path,
-                    rmf, background, band_ev=band)
-                extra["background_file"] = background.name
-
-            self._copy_responses()
-
-            return pulsaris_export.write(
-                source, output, extra=extra,
-                instrument=_profile_id(state),
-                obsid=state.obsid, target=state.target,
-                period_s=state.period_s,
-                time_resolution_us=events.time_resolution_us(),
-                band_ev=band, rmf=rmf, region=region,
-                max_events=maximum)
+            # A mesma exportação da linha de comando: eventos da região da
+            # fonte, GTIs, exposição por fase, fundo, respostas e manifesto,
+            # todos com o nome do conjunto (fonte, ObsID, câmera, exposição).
+            return pipeline.export_products(band_ev=band, max_events=maximum)
 
         self.run_task(work, self._csv_done, t("export.writing_csv"), advance=False)
 
-    def _csv_done(self, report) -> None:
-        pipeline = self.window.pipeline
-        pipeline.state.exported_csv = report.path
-        pipeline.session.record_action(
-            "export", f"CSV {report.path.name} escrito pelo XreduX: "
-                      f"{report.events_written} de {report.events_available} eventos"
-                      + (f", decimado com semente {report.decimation_seed}"
-                         if report.decimated else ""))
-        pipeline.session.save()
+    def _csv_done(self, exported) -> None:
+        report = exported.report
         lines = [
             t("export.csv_written", path=str(report.path)),
             t("export.csv_events", written=report.events_written,
               available=report.events_available),
             t("export.csv_size", size=f"{report.size_bytes / 1e6:.1f}"),
         ]
-        state = pipeline.state
-        if state.background_spectrum is not None:
+        if exported.background is not None:
             lines.append(t("export.background_written"))
-        lines += [f"⚠ {message}" for message in report.warnings]
+        lines += [f"  {path}" for path in (exported.gti, exported.manifest)]
+        if exported.phase is not None:
+            lines.append(f"  {exported.phase.path}")
+        lines += [f"⚠ {message}" for message in exported.warnings]
         self._append(lines)
 
     # -- perfil de instrumento --------------------------------------------
 
     def _copy_responses(self) -> list[Path]:
-        """Põe o ARF e o RMF na pasta pulsaris/ da observação.
+        """Põe o ARF e o RMF na pasta pulsaris/, com o nome do conjunto.
 
-        **Isto vivia dentro da exportação do CSV**, então quem apertava só
-        "construir perfil" ficava com uma pasta ``pulsaris/`` contendo apenas
-        ``profile/`` — sem resposta nenhuma ao lado. Os dois botões produzem
-        dado da mesma observação, e o ARF e o RMF pertencem a ela em qualquer
-        um dos caminhos.
-
-        Renomeia com o prefixo da fonte porque o SAS os entrega como ``src.arf``
-        e ``src.rmf``, nomes que não dizem de quem são assim que saem da pasta.
+        O botão do perfil pode ser o único que o usuário aperta; os nomes são
+        os mesmos que a exportação do CSV usa, então um não duplica o outro.
         """
         pipeline = self.window.pipeline
         state = pipeline.state
         if state.source_spectrum is None:
             return []
-        stem = file_stem(state.target, state.obsid)
-        instrument = state.selected.instrument.lower()
         directory = pipeline.work_dir / "pulsaris"
         directory.mkdir(parents=True, exist_ok=True)
+        stem = pipeline.set_identifier()
         written: list[Path] = []
         for response, suffix in ((state.source_spectrum.rmf, ".rmf"),
                                  (state.source_spectrum.arf, ".arf")):
             if response is not None and Path(response).is_file():
-                destination = directory / f"{stem}_{instrument}{suffix}"
-                shutil.copy(response, destination)
+                destination = directory / f"{stem}{suffix}"
+                shutil.copy2(response, destination)
+                pipeline.session.record_action(
+                    "export", f"{Path(response).name} copiado para {destination.name}",
+                    shell=["cp", "-p", str(response), str(destination)])
                 written.append(destination)
         return written
 
@@ -229,7 +170,13 @@ class ExportPage(Page):
         # Numa subpasta: estes arquivos são instalados no PULSARIS, não abertos
         # por ele, e misturá-los com a lista de eventos é o que confunde.
         output_dir = pipeline.work_dir / "pulsaris" / "profile"
-        identifier = _profile_id(state)
+        identifier = pipeline.profile_identifier()
+        try:
+            resolution = state.selected.time_resolution_us()
+        except ValueError as error:
+            # Resolução desconhecida não vira número no perfil.
+            self.set_status(str(error), "failed")
+            return
         band = (self._low.value() / 1000.0, self._high.value() / 1000.0)
         spectrum = state.source_spectrum
 
@@ -240,10 +187,11 @@ class ExportPage(Page):
             bundle = profile_export.build(
                 pulsaris_root, output_dir, identifier=identifier,
                 label=f"XMM-Newton / {events.instrument} {state.obsid}",
-                instrument=f"{events.instrument} {events.mode} {events.filter_name}".strip(),
+                instrument=f"{events.instrument} {events.submode or events.mode} "
+                           f"{events.filter_name}".strip(),
                 arf=spectrum.arf, rmf=spectrum.rmf,
                 energy_range_kev=band,
-                time_resolution_us=events.time_resolution_us(),
+                time_resolution_us=resolution,
                 target=state.target, obsid=state.obsid,
                 calibration=(f"ARF e RMF gerados pelo SAS para a observação "
                              f"{state.obsid}, região {state.source_region.description}."))
@@ -319,11 +267,3 @@ class ExportPage(Page):
         self._install_button.setText(t("export.install"))
         self._latex_button.setText(t("export.latex"))
 
-
-def _profile_id(state) -> str:
-    # O submodo, como na linha de comando: o DATAMODE só distingue IMAGING de
-    # TIMING, e duas reduções da mesma observação saíam com nomes diferentes
-    # conforme o caminho (interface ou CLI).
-    events = state.selected
-    return profile_export.identifier_for(state.obsid, events.instrument,
-                                         events.submode or events.mode)

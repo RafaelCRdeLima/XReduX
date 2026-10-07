@@ -264,7 +264,10 @@ def epoch_to_utc(events_path: Path) -> str | None:
             header = hdus[1].header
             start = float(header["TSTART"])
             reference = float(header.get("MJDREF", 50814.0))
-        moment = Time(reference + start / 86400.0, format="mjd", scale="tt")
+            # A escala é a do arquivo: depois do barycen, TDB. Ler TSTART como
+            # TT, como antes, misturava escalas na ida e na volta da época.
+            scale = _time_scale(header)
+        moment = Time(reference + start / 86400.0, format="mjd", scale=scale)
         return moment.utc.isot
     except (OSError, KeyError, ValueError, TypeError):
         return None
@@ -332,36 +335,95 @@ def phase_resolved(context: TaskContext, events: EventList, events_path: Path,
     return spectra
 
 
-def good_time_intervals(events_path: Path, ccd: int | None = None) -> np.ndarray:
-    """Intervalos de tempo bom da lista: a GTI do CCD cruzada com as do corte.
+@dataclass
+class GoodTime:
+    """Tempo bom do CCD da fonte, com as extensões de onde saiu."""
 
-    A extensão ``STDGTInn`` diz quando o CCD da fonte esteve lendo; as ``GTI*``
-    acrescentadas pela filtragem dizem quando o fundo estava calmo. O tempo
-    válido é a interseção das duas. Sem CCD informado, usa-se a primeira
-    ``STDGTI`` da lista.
+    intervals: np.ndarray
+    ccd: int
+    extensions: list[str]
+    timesys: str = ""
+
+    @property
+    def total_s(self) -> float:
+        return float(np.sum(self.intervals[:, 1] - self.intervals[:, 0]))
+
+
+def source_gti(events_path: Path, ccd: int | None) -> GoodTime:
+    """Intervalos de tempo bom do CCD da fonte: ``STDGTInn`` ∩ GTI da filtragem.
+
+    A ``STDGTInn`` diz quando o CCD ``nn`` esteve lendo; a filtragem de flares
+    acrescenta uma GTI **por CCD** (no pn, ``GTI00k05`` com ``CCDID = k+1``),
+    que diz quando o fundo estava calmo naquele CCD. O tempo bom da fonte é a
+    interseção das duas do CCD dela — e só delas. A versão anterior cruzava a
+    STDGTI escolhida com as GTIs de corte de **todos** os CCDs, e uma lacuna
+    num CCD sem a fonte tirava exposição da fonte.
+
+    GTIs sem ``CCDID`` valem para a câmera inteira e entram na interseção.
+    Cada lista é unida antes (intervalos sobrepostos ou encostados contam uma
+    vez só), e o resultado sai ordenado e disjunto.
     """
     from astropy.io import fits
 
     with fits.open(events_path, memmap=False) as hdus:
         names = [hdu.name.upper() for hdu in hdus]
-        chip = f"STDGTI{ccd:02d}" if ccd is not None else None
-        chosen = chip if chip in names else next(
-            (name for name in names if name.startswith("STDGTI")), None)
-        lists = []
-        for name in ([chosen] if chosen else []) + [
-                name for name in names if name.startswith("GTI")]:
-            data = hdus[name].data
-            if data is None or len(data) == 0:
+        standard = [name for name in names if name.startswith("STDGTI")]
+        if ccd is None:
+            if len(standard) != 1:
+                raise ValueError(f"{Path(events_path).name}: CCD da fonte desconhecido e "
+                                 f"{len(standard)} STDGTI na lista; não há como escolher")
+            ccd = int(standard[0][6:])
+        chip = f"STDGTI{ccd:02d}"
+        if chip not in names:
+            raise ValueError(f"{Path(events_path).name} não traz {chip}, a GTI do CCD "
+                             f"{ccd} onde está a fonte")
+        used = [chip]
+        for name in names:
+            if not name.startswith("GTI"):
                 continue
-            lists.append(np.column_stack([np.asarray(data["START"], dtype=float),
-                                          np.asarray(data["STOP"], dtype=float)]))
-    if not lists:
-        raise ValueError(f"{events_path.name} não traz GTI; a exposição por fase "
-                         "não pode ser calculada")
+            owner = hdus[name].header.get("CCDID")
+            if owner is None or int(owner) == ccd:
+                used.append(name)
+        lists = []
+        timesys = set()
+        for name in used:
+            hdu = hdus[name]
+            if hdu.header.get("TIMESYS"):
+                timesys.add(str(hdu.header["TIMESYS"]).strip().upper())
+            data = hdu.data
+            pairs = (np.column_stack([np.asarray(data["START"], dtype=float),
+                                      np.asarray(data["STOP"], dtype=float)])
+                     if data is not None and len(data) else np.empty((0, 2)))
+            lists.append(merge_intervals(pairs))
+    if len(timesys) > 1:
+        raise ValueError(f"GTIs de {Path(events_path).name} em escalas diferentes: "
+                         f"{sorted(timesys)}")
     result = lists[0]
     for other in lists[1:]:
         result = _intersect(result, other)
-    return result
+    return GoodTime(intervals=merge_intervals(result), ccd=ccd, extensions=used,
+                    timesys=next(iter(timesys), ""))
+
+
+def good_time_intervals(events_path: Path, ccd: int | None = None) -> np.ndarray:
+    """Intervalos de tempo bom do CCD da fonte; ver :func:`source_gti`."""
+    return source_gti(events_path, ccd).intervals
+
+
+def merge_intervals(intervals: np.ndarray) -> np.ndarray:
+    """União de intervalos [início, fim): ordenados, disjuntos, sem vazios."""
+    intervals = np.asarray(intervals, dtype=float).reshape(-1, 2)
+    intervals = intervals[intervals[:, 1] > intervals[:, 0]]
+    if intervals.size == 0:
+        return intervals
+    intervals = intervals[np.argsort(intervals[:, 0], kind="stable")]
+    merged = [list(intervals[0])]
+    for start, stop in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], stop)
+        else:
+            merged.append([start, stop])
+    return np.array(merged, dtype=float)
 
 
 def _intersect(first: np.ndarray, second: np.ndarray) -> np.ndarray:
@@ -375,14 +437,29 @@ def _intersect(first: np.ndarray, second: np.ndarray) -> np.ndarray:
     return np.array(sorted(pieces), dtype=float).reshape(-1, 2)
 
 
+def phase_coverage_s(intervals: np.ndarray, period_s: float, epoch_s: float,
+                     edges: np.ndarray) -> np.ndarray:
+    """Segundos de tempo bom em cada intervalo de fase ``edges``.
+
+    A fase é ``frac((t − epoch)/P)``, a mesma convenção do ajuste. Para cada
+    intervalo, a conta é a diferença de uma função acumulada, então ciclos
+    parciais, intervalos que cruzam a fase zero e intervalos antes da época
+    (fase negativa antes do ``frac``) saem certos sem caso especial. Os
+    intervalos precisam estar disjuntos — :func:`merge_intervals` garante.
+    """
+    edges = np.asarray(edges, dtype=float)
+    coverage = np.zeros(len(edges) - 1)
+    for start, stop in merge_intervals(intervals):
+        coverage += (_cycles_in_bins((stop - epoch_s) / period_s, edges)
+                     - _cycles_in_bins((start - epoch_s) / period_s, edges))
+    return coverage * period_s
+
+
 def phase_exposure_fractions(events_path: Path, frequency_hz: float, epoch_s: float,
                              edges: np.ndarray, ccd: int | None = None) -> np.ndarray:
     """Fração do tempo bom passada em cada intervalo de fase ``edges``."""
     intervals = good_time_intervals(events_path, ccd=ccd)
-    coverage = np.zeros(len(edges) - 1)
-    for start, stop in intervals:
-        coverage += (_cycles_in_bins(frequency_hz * (stop - epoch_s), edges)
-                     - _cycles_in_bins(frequency_hz * (start - epoch_s), edges))
+    coverage = phase_coverage_s(intervals, 1.0 / frequency_hz, epoch_s, edges)
     total = coverage.sum()
     if total <= 0.0:
         raise ValueError("as GTIs não cobrem tempo nenhum")
@@ -409,11 +486,22 @@ def _epoch_seconds(events_path: Path, epoch_utc: str | None) -> float:
         header = hdus[1].header
         start = float(header["TSTART"])
         reference = float(header.get("MJDREF", 50814.0))
+        scale = _time_scale(header)
     if not epoch_utc:
         return start
     from astropy.time import Time
 
-    return (Time(epoch_utc, scale="utc").tt.mjd - reference) * 86400.0
+    moment = getattr(Time(epoch_utc, scale="utc"), scale)
+    return (moment.mjd - reference) * 86400.0
+
+
+def _time_scale(header) -> str:
+    """Escala de tempo do arquivo para o astropy (``tt`` ou ``tdb``)."""
+    scale = str(header.get("TIMESYS") or "").strip().lower()
+    if scale not in {"tt", "tdb"}:
+        raise ValueError(f"TIMESYS '{header.get('TIMESYS')}' não reconhecido; "
+                         "a época de fase não pode ser convertida")
+    return scale
 
 
 def _scale_exposure(path: Path, fraction: float) -> float:

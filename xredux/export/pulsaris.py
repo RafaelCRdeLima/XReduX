@@ -23,7 +23,17 @@ from pathlib import Path
 
 import numpy as np
 
+from ..timebase import TimeReference, reference_from_events
+
 FORMAT_TAG = "PULSARIS_SYNTHETIC_EVENTS_V1"
+PHASE_EXPOSURE_TAG = "XREDUX_PHASE_EXPOSURE_V1"
+GTI_TAG = "XREDUX_GTI_V1"
+#: Bins de fase da tabela de exposição: os mesmos do coadicionamento do MAGNUS.
+PHASE_EXPOSURE_BINS = 32
+#: Diferença relativa máxima aceita entre a soma das GTIs do CCD (em TDB) e o
+#: ONTIME do mesmo CCD (em tempo local). A conversão de escala muda durações
+#: por ~v/c ≈ 10⁻⁴; acima de 10⁻³ a GTI escolhida não é a que gerou o ONTIME.
+GTI_ONTIME_TOLERANCE = 1.0e-3
 #: Limite de upload do servidor do PULSARIS (``server.py``: ``MAX_EVENT_UPLOAD``).
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 #: Custo médio por linha do CSV, medido nos arquivos de exemplo do PULSARIS.
@@ -41,6 +51,15 @@ class ExportReport:
     decimated: bool = False
     decimation_seed: int | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Exposição declarada no CSV (já multiplicada por p, se decimado).
+    exposure_s: float = 0.0
+    livetime_full_s: float = 0.0
+    decimation_probability: float = 1.0
+    #: Eventos da lista antes do corte de banda, e fora da grade da RMF.
+    events_in_file: int = 0
+    events_outside_grid: int = 0
+    #: O cabeçalho escrito, chave por chave.
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def fits_upload(self) -> bool:
@@ -110,20 +129,31 @@ def read_events(events_path: Path, band_ev: tuple[int, int] | None = None,
 
 
 def write(events_path: Path, output: Path, *, instrument: str,
+          time_resolution_us: float | None,
           obsid: str = "", target: str = "", period_s: float | None = None,
-          exposure_s: float | None = None, time_resolution_us: float = 0.0,
+          exposure_s: float | None = None,
           dead_time_us: float = 0.0, band_ev: tuple[int, int] | None = None,
           rmf: Path | None = None, region: str = "",
           phase_reference_s: float = 0.0, extra: dict[str, object] | None = None,
-          max_events: int | None = None, seed: int = 1234) -> ExportReport:
+          max_events: int | None = None, seed: int = 1234,
+          time_reference: TimeReference | None = None) -> ExportReport:
     """Escreve o CSV de eventos para o PULSARIS.
 
-    Origem dos tempos: o ``TSTART`` da lista (ou, sem ele, o primeiro evento
-    da lista inteira), fixado antes do corte de banda e de qualquer decimação.
-    Antes era o primeiro evento já filtrado e decimado, e mudar a banda ou a
-    semente deslocava a origem — e com ela a fase absoluta. ``phase_reference_s``
-    se refere a essa origem, que vai explícita no cabeçalho com o sistema de
-    tempo (``time_origin_s``, ``timesys``, ``mjdref``).
+    Origem dos tempos: ``time_reference`` — o ``TSTART`` da lista
+    baricentrada da exposição inteira, com escala, referencial, MJDREF,
+    TIMEZERO e o arquivo de onde saiu. Sem ela, o ``TSTART`` da própria lista
+    exportada. A origem é fixada antes do corte de banda, da região e de
+    qualquer decimação: até a versão anterior era o primeiro evento já
+    filtrado, e mudar a banda deslocava a fase absoluta sem aviso. A lista
+    exportada precisa estar na mesma escala e referencial da origem; se não
+    estiver, nada é escrito.
+
+    ``phase_reference_s`` é a época de fase zero **contada a partir da
+    origem**; ela e o período vão separados da origem no cabeçalho, junto
+    com a convenção ``fase = frac((TIME − phase_reference_s)/period_s)``.
+
+    ``time_resolution_us`` é obrigatória e positiva: zero ou ausente não é
+    "sem suavização", é resolução desconhecida.
 
     Decimação: quando a lista excede ``max_events``, cada evento é mantido com
     probabilidade ``p``, independentemente dos demais (desbaste de Bernoulli).
@@ -133,6 +163,10 @@ def write(events_path: Path, output: Path, *, instrument: str,
     multiplica pela mesma exposição. N, p, semente e tempo vivo integral vão
     ao cabeçalho: o arquivo diz sozinho que é uma amostra.
     """
+    if (time_resolution_us is None or not math.isfinite(float(time_resolution_us))
+            or float(time_resolution_us) <= 0.0):
+        raise ValueError(f"resolução temporal inválida ({time_resolution_us!r} µs): "
+                         "desconhecida não pode ir ao CSV como número")
     time, channel, energy_kev, header = read_events(events_path, band_ev=band_ev, rmf=rmf)
     available = int(time.size)
     warnings: list[str] = []
@@ -144,7 +178,9 @@ def write(events_path: Path, output: Path, *, instrument: str,
     if available == 0:
         raise ValueError("nenhum evento sobrou após os filtros; verifique região e banda")
 
-    origin = _time_origin(header)
+    reference = time_reference or reference_from_events(events_path)
+    reference.check(header, f"{Path(events_path).name}[EVENTS]")
+    origin = reference.origin_s
     live = _live_time(header)
     if exposure_s is None:
         exposure_s = live
@@ -181,11 +217,12 @@ def write(events_path: Path, output: Path, *, instrument: str,
             warnings.append("a amostra excedeu o limite por flutuação; repita com outra semente")
 
     elapsed = time - origin
+    epoch_mission = origin + phase_reference_s
     metadata: dict[str, object] = {
         "instrument": instrument,
         "folded_in_phase": "false",
         "exposure_s": f"{exposure_s:.6f}",
-        "time_resolution_us": f"{time_resolution_us:g}",
+        "time_resolution_us": f"{float(time_resolution_us):g}",
         "dead_time_us": f"{dead_time_us:g}",
         "phase_reference_s": f"{phase_reference_s:.9f}",
         "source": "XMM-Newton",
@@ -194,11 +231,14 @@ def write(events_path: Path, output: Path, *, instrument: str,
         "detected_events": len(time),
         # Nome mantido por compatibilidade: é tempo da missão em segundos, não MJD.
         "time_origin_mjd_s": f"{origin:.6f}",
-        "time_origin_s": f"{origin:.6f}",
-        "time_origin_from": "TSTART" if header.get("TSTART") is not None else "first_event",
-        "timesys": str(header.get("TIMESYS", "")).strip() or "unknown",
-        "mjdref": f"{_mjdref(header):.10g}",
-        "barycentric": str(header.get("TIMEREF", "")).strip().upper() or "unknown",
+        **reference.metadata(),
+        "barycentric": reference.timeref,
+        # Época e período ficam separados da origem: mudar um não muda o outro.
+        "phase_epoch_mission_s": f"{epoch_mission:.6f}",
+        "phase_epoch_mjd": f"{reference.to_mjd(epoch_mission):.15g}",
+        "phase_convention": "phase = frac((TIME - phase_reference_s) / period_s)",
+        "events_in_file": int(header.get("XREDUX_ALL_EVENTS", available)),
+        "events_in_band": available + outside,
         "produced_by": "XREDUX",
     }
     if decimated:
@@ -241,27 +281,11 @@ def write(events_path: Path, output: Path, *, instrument: str,
         )
     return ExportReport(path=output, events_written=len(time), events_available=available,
                         size_bytes=size, decimated=decimated,
-                        decimation_seed=seed if decimated else None, warnings=warnings)
-
-
-def _time_origin(header: dict) -> float:
-    """Origem dos tempos exportados, independente da banda e da decimação."""
-    start = header.get("TSTART")
-    try:
-        if start is not None:
-            return float(start)
-    except (TypeError, ValueError):
-        pass
-    return float(header.get("XREDUX_FIRST_TIME", 0.0))
-
-
-def _mjdref(header: dict) -> float:
-    """MJD de referência do tempo da missão (MJDREF, ou MJDREFI + MJDREFF)."""
-    if header.get("MJDREF") is not None:
-        return float(header["MJDREF"])
-    if header.get("MJDREFI") is not None:
-        return float(header["MJDREFI"]) + float(header.get("MJDREFF", 0.0))
-    return 50814.0
+                        decimation_seed=seed if decimated else None, warnings=warnings,
+                        exposure_s=float(exposure_s), livetime_full_s=float(full_exposure),
+                        decimation_probability=float(probability),
+                        events_in_file=int(header.get("XREDUX_ALL_EVENTS", available)),
+                        events_outside_grid=outside, metadata=metadata)
 
 
 def _live_time(header: dict) -> float | None:
@@ -277,6 +301,173 @@ def _live_time(header: dict) -> float | None:
         if live > 0.0:
             return live
     return None
+
+
+def ccd_exposure(events_path: Path, ccd: int) -> tuple[float, float]:
+    """``ONTIMEnn`` e ``LIVETInn`` do CCD ``nn``, do cabeçalho ``EVENTS``.
+
+    São durações em tempo local do satélite: o ``barycen`` converte TIME,
+    TSTART, TSTOP e as GTIs para TDB, mas não estes cartões.
+    """
+    from astropy.io import fits
+
+    with fits.open(events_path, memmap=True) as hdus:
+        header = hdus["EVENTS"].header
+        ontime = header.get(f"ONTIME{ccd:02d}")
+        livetime = header.get(f"LIVETI{ccd:02d}")
+    if ontime is None or livetime is None or not float(ontime) > 0.0:
+        raise ValueError(f"{Path(events_path).name} não traz ONTIME{ccd:02d} e "
+                         f"LIVETI{ccd:02d} válidos para o CCD da fonte")
+    return float(ontime), float(livetime)
+
+
+def _gti_metadata(good_time, reference: TimeReference, set_id: str,
+                  events_file: str) -> dict[str, object]:
+    intervals = np.asarray(good_time.intervals, dtype=float)
+    return {
+        "set_id": set_id,
+        "events_file": events_file,
+        **reference.metadata(),
+        "source_ccd": good_time.ccd,
+        "gti_extensions": ",".join(good_time.extensions),
+        "gti_total_s": f"{float(np.sum(intervals[:, 1] - intervals[:, 0])):.6f}",
+    }
+
+
+def _check_gti_scale(good_time, reference: TimeReference) -> None:
+    if good_time.timesys and good_time.timesys != reference.timesys:
+        raise ValueError(f"GTIs em {good_time.timesys} e eventos em {reference.timesys}: "
+                         "escalas diferentes não podem ser subtraídas")
+
+
+def write_gti(output: Path, *, good_time, reference: TimeReference, set_id: str = "",
+              events_file: str = "") -> Path:
+    """Escreve as GTIs do CCD da fonte, contadas a partir da origem do CSV."""
+    _check_gti_scale(good_time, reference)
+    intervals = np.asarray(good_time.intervals, dtype=float) - reference.origin_s
+    metadata = {**_gti_metadata(good_time, reference, set_id, events_file),
+                "intervals": len(intervals),
+                "columns": "START e STOP menos time_origin_s, em segundos na escala "
+                           "timesys; intervalos unidos e disjuntos",
+                "produced_by": "XREDUX"}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with Path(output).open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"# {GTI_TAG}\n")
+        for key, value in metadata.items():
+            if value not in (None, ""):
+                stream.write(f"# {key}={value}\n")
+        stream.write("START,STOP\n")
+        for start, stop in intervals:
+            stream.write(f"{start:.6f},{stop:.6f}\n")
+    return Path(output)
+
+
+@dataclass
+class PhaseExposure:
+    """Exposição efetiva por intervalo de fase, e como ela foi calculada."""
+
+    path: Path
+    gti_path: Path | None
+    edges: np.ndarray
+    gti_s: np.ndarray
+    exposure_s: np.ndarray
+    exposure_total_s: float
+    gti_total_s: float
+    ontime_s: float
+    livetime_s: float
+    gti_ontime_relative: float
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+def write_phase_exposure(output: Path, *, good_time,
+                         reference: TimeReference, period_s: float,
+                         phase_reference_s: float, exposure_total_s: float,
+                         ontime_s: float, livetime_s: float,
+                         decimation_probability: float = 1.0,
+                         bins: int = PHASE_EXPOSURE_BINS, events_file: str = "",
+                         set_id: str = "", gti_file: Path | None = None) -> PhaseExposure:
+    """Escreve a exposição efetiva por bin de fase.
+
+    Receita, na mesma convenção de tempo, período e época do CSV de eventos:
+
+    * ``t`` = tempo da GTI menos ``time_origin_s`` (mesmo arquivo, mesma escala);
+    * fase = ``frac((t − phase_reference_s)/period_s)``;
+    * ``G_k`` = segundos de GTI com fase no bin ``k`` (intervalos unidos antes,
+      ciclos parciais e a passagem pela fase zero contados exatamente);
+    * ``E_k = exposure_total_s · G_k / ΣG``.
+
+    ``exposure_total_s`` é a do CSV (``p ×`` tempo vivo do CCD da fonte), e a
+    correção de tempo morto entra uma vez só, nela. **Aproximação declarada**:
+    a fração viva (LIVETIME/ONTIME) é tratada como constante ao longo da
+    observação — o SAS não a distribui no tempo —, assim como a razão entre
+    durações em TDB e em tempo local. A diferença relativa entre ΣG e o ONTIME
+    do CCD vai ao cabeçalho; acima de ``GTI_ONTIME_TOLERANCE`` nada é escrito,
+    porque a GTI não seria a que gerou a exposição.
+    """
+    from ..tasks.spectra import phase_coverage_s
+
+    if not (period_s and period_s > 0.0):
+        raise ValueError("período inválido para a exposição por fase")
+    _check_gti_scale(good_time, reference)
+    intervals = np.asarray(good_time.intervals, dtype=float) - reference.origin_s
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    coverage = phase_coverage_s(intervals, period_s, phase_reference_s, edges)
+    total = float(np.sum(intervals[:, 1] - intervals[:, 0]))
+    if total <= 0.0:
+        raise ValueError("as GTIs do CCD da fonte não cobrem tempo nenhum")
+    if not math.isclose(float(coverage.sum()), total, rel_tol=1e-9, abs_tol=1e-6):
+        raise ValueError(f"a cobertura em fase soma {coverage.sum():.6f} s e as GTIs "
+                         f"{total:.6f} s")
+    mismatch = (total - ontime_s) / ontime_s
+    if abs(mismatch) > GTI_ONTIME_TOLERANCE:
+        raise ValueError(
+            f"as GTIs do CCD {good_time.ccd} somam {total:.3f} s e o ONTIME do mesmo CCD é "
+            f"{ontime_s:.3f} s (diferença relativa {mismatch:.2e}); a GTI não é a que "
+            "gerou a exposição")
+    if not math.isclose(exposure_total_s, decimation_probability * livetime_s, rel_tol=1e-9):
+        raise ValueError(f"exposição total {exposure_total_s:.6f} s não é p × tempo vivo "
+                         f"do CCD ({decimation_probability:.9g} × {livetime_s:.6f} s): "
+                         "a correção de tempo morto estaria duplicada ou ausente")
+    exposure = exposure_total_s * coverage / total
+    if not math.isclose(float(exposure.sum()), exposure_total_s, rel_tol=1e-9):
+        raise ValueError("a exposição por fase não soma a exposição total")
+
+    metadata = {
+        **_gti_metadata(good_time, reference, set_id, events_file),
+        "period_s": f"{period_s:.12g}",
+        "phase_reference_s": f"{phase_reference_s:.9f}",
+        "phase_convention": "phase = frac((TIME - phase_reference_s) / period_s)",
+        "phase_bins": bins,
+        "ontime_ccd_s": f"{ontime_s:.6f}",
+        "livetime_ccd_s": f"{livetime_s:.6f}",
+        "live_fraction": f"{livetime_s / ontime_s:.9f}",
+        "gti_vs_ontime_relative": f"{mismatch:.3e}",
+        "decimation_probability": f"{decimation_probability:.9g}",
+        "exposure_total_s": f"{exposure_total_s:.6f}",
+        "exposure_sum_s": f"{exposure.sum():.6f}",
+        "recipe": "E_k = exposure_total_s * G_k / sum(G); G_k = segundos de GTI com fase "
+                  "no bin k; exposure_total_s = decimation_probability * livetime_ccd_s",
+        "approximation": "fração viva LIVETIME/ONTIME constante no tempo; razão entre "
+                         "durações em timesys e em tempo local constante",
+        "gti_file": Path(gti_file).name if gti_file else "",
+        "produced_by": "XREDUX",
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"# {PHASE_EXPOSURE_TAG}\n")
+        for key, value in metadata.items():
+            if value not in (None, ""):
+                stream.write(f"# {key}={value}\n")
+        stream.write("phase_low,phase_high,gti_s,exposure_s\n")
+        for low, high, seconds, effective in zip(edges[:-1], edges[1:], coverage, exposure):
+            stream.write(f"{low:.6f},{high:.6f},{seconds:.6f},{effective:.6f}\n")
+
+    return PhaseExposure(path=output, gti_path=Path(gti_file) if gti_file else None,
+                         edges=edges,
+                         gti_s=coverage, exposure_s=exposure,
+                         exposure_total_s=float(exposure_total_s), gti_total_s=total,
+                         ontime_s=ontime_s, livetime_s=livetime_s,
+                         gti_ontime_relative=mismatch, metadata=metadata)
 
 
 def write_background(source_spectrum: Path, background_spectrum: Path, rmf: Path,

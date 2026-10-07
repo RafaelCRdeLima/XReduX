@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from xredux.config import Settings  # noqa: E402
 from xredux.pipeline import Pipeline, build_context  # noqa: E402
 from xredux.session import Session  # noqa: E402
-from xredux.tasks import absorption, acquisition, regions, timing  # noqa: E402
+from xredux.tasks import acquisition, regions, timing  # noqa: E402
 
 GREEN, YELLOW, RED, BOLD, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[1m", "\033[0m"
 
@@ -69,6 +69,22 @@ def parse_arguments() -> argparse.Namespace:
                         help="instala o perfil no repositório do PULSARIS "
                              "(ação explícita; implica --export)")
     parser.add_argument("--mos", action="store_true", help="processa também as MOS")
+    parser.add_argument("--work-dir", type=Path, default=None,
+                        help="raiz do arquivo de produtos desta execução (padrão: a das "
+                             "preferências); use uma pasta nova para não tocar reduções "
+                             "anteriores")
+    parser.add_argument("--odf", type=Path, default=None,
+                        help="diretório de ODF já baixado, copiado para a pasta da "
+                             "observação em vez de baixar de novo")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="limiar da filtragem de flares em ct/s (padrão: o sugerido)")
+    parser.add_argument("--seed", type=int, default=1234,
+                        help="semente do desbaste, se a lista exceder o limite")
+    parser.add_argument("--phase-exposure-bins", type=int, default=32,
+                        help="bins de fase da tabela de exposição exportada")
+    parser.add_argument("--no-pileup", action="store_true",
+                        help="não roda o diagnóstico de empilhamento (fica registrado "
+                             "como não executado, nunca como limpo)")
     return parser.parse_args()
 
 
@@ -110,7 +126,12 @@ def _reuse_processing(pipeline: Pipeline, session: Session,
 
 
 def _export(pipeline: Pipeline, arguments, work: Path) -> None:
-    """Escreve o CSV de eventos e o perfil de instrumento da observação."""
+    """Escreve o conjunto exportado e o perfil de instrumento da observação.
+
+    O conjunto (eventos, GTIs, exposição por fase, fundo, respostas, regiões e
+    manifesto) sai de :meth:`Pipeline.export_products`, o mesmo caminho da
+    interface gráfica.
+    """
     from xredux.export import profile as profile_export
     from xredux.export import pulsaris as pulsaris_export
 
@@ -119,77 +140,40 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
     if state.barycentered is None:
         warn("sem eventos baricentrados: nada a exportar")
         return
-
-    output_dir = work / "pulsaris"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    source = pipeline.source_events(band_ev=tuple(arguments.band))
-    report(f"eventos da região da fonte: {source.name}")
-
-    # Coluna galáctica pela ferramenta oficial do HEASoft. É limite superior para
-    # uma fonte dentro da Galáxia, e vai ao cabeçalho rotulada como tal.
-    extra: dict[str, object] = {}
-    if state.ra is not None and state.dec is not None:
-        column = absorption.galactic_column(pipeline.context, state.ra, state.dec)
-        if column is not None:
-            extra["nh_galactic_upper_1e22"] = f"{column.nh_1e22:.6g}"
-            extra["nh_survey"] = column.survey
-            report(f"N_H galáctico: {column.describe()}")
-        else:
-            warn("a ferramenta nh do HEASoft não respondeu; N_H fica a seu critério")
-    identifier = profile_export.identifier_for(state.obsid, events.instrument,
-                                               events.submode or events.mode)
-    rmf = state.source_spectrum.rmf if state.source_spectrum else None
-    if rmf is None:
+    if state.source_spectrum is None or state.source_spectrum.rmf is None:
         warn("sem RMF: o CSV declara canais da resposta, e o perfil e a tabela de "
              "fundo também a exigem; rode a etapa de espectros antes de exportar")
         return
 
-    report_csv = pulsaris_export.write(
-        source, output_dir / f"{identifier}_events.csv",
-        instrument=identifier, obsid=state.obsid, target=state.target,
-        period_s=state.period_s,
-        time_resolution_us=events.time_resolution_us(),
-        band_ev=tuple(arguments.band), rmf=rmf,
-        region=state.source_region.description if state.source_region else "",
-        extra=extra, max_events=pulsaris_export.max_events_for_upload())
-    pipeline.session.record_action(
-        "export", f"CSV {report_csv.path.name} escrito pelo XreduX: "
-                  f"{report_csv.events_written} de {report_csv.events_available} eventos"
-                  + (f", decimado com semente {report_csv.decimation_seed}"
-                     if report_csv.decimated else ""))
-    pipeline.session.save()
+    exported = pipeline.export_products(
+        output_dir=work / "pulsaris", band_ev=tuple(arguments.band),
+        max_events=pulsaris_export.max_events_for_upload(), seed=arguments.seed,
+        phase_bins=arguments.phase_exposure_bins)
+    report_csv = exported.report
+    report(f"conjunto {exported.set_id} (perfil {exported.profile_id})")
     report(f"CSV: {report_csv.path.name} · {report_csv.events_written} de "
-           f"{report_csv.events_available} eventos · "
-           f"{report_csv.size_bytes / 1e6:.1f} MB")
-    for message in report_csv.warnings:
+           f"{report_csv.events_available} eventos · exposição "
+           f"{report_csv.exposure_s:.3f} s · {report_csv.size_bytes / 1e6:.1f} MB")
+    if exported.phase is not None:
+        report(f"exposição por fase: {exported.phase.path.name} · soma "
+               f"{exported.phase.exposure_s.sum():.3f} s · GTI/ONTIME − 1 = "
+               f"{exported.phase.gti_ontime_relative:.2e}")
+    report(f"manifesto: {exported.manifest.name}")
+    for message in exported.warnings:
         warn(message)
 
-    # Tabela de fundo escalada pelo BACKSCAL, para o ajuste não creditar à
-    # estrela as contagens que são do céu e do detector.
-    background = state.background_spectrum
-    if background is not None and state.source_spectrum is not None:
-        try:
-            path = pulsaris_export.write_background(
-                state.source_spectrum.path, background.path, rmf,
-                output_dir / f"{identifier}_background.csv",
-                band_ev=tuple(arguments.band))
-            report(f"fundo: {path.name}")
-        except (ValueError, OSError) as error:
-            warn(f"tabela de fundo não escrita: {error}")
-    else:
-        warn("sem espectro de fundo: o ajuste atribuirá todo evento à estrela")
-
     bundle = profile_export.build(
-        Path(pipeline.settings.pulsaris_root), output_dir,
-        identifier=identifier,
-        label=f"XMM-Newton / {events.instrument} {state.obsid}",
+        Path(pipeline.settings.pulsaris_root), work / "pulsaris" / "profile",
+        identifier=exported.profile_id,
+        label=f"XMM-Newton / {events.instrument} {state.obsid} {events.exposure_id}",
         instrument=f"{events.instrument} {events.submode} {events.filter_name}".strip(),
-        arf=state.source_spectrum.arf, rmf=rmf,
+        arf=state.source_spectrum.arf, rmf=state.source_spectrum.rmf,
         energy_range_kev=(arguments.band[0] / 1000.0, arguments.band[1] / 1000.0),
         time_resolution_us=events.time_resolution_us(),
+        target=state.target, obsid=state.obsid,
         calibration=(f"ARF e RMF gerados pelo SAS para a observação {state.obsid}, "
-                     f"região {state.source_region.description}."))
+                     f"exposição {events.exposure_id}, região "
+                     f"{state.source_region.description}."))
     report(f"perfil '{bundle.identifier}': {bundle.profile_csv.name} + "
            f"{bundle.response_bin.name}")
     for message in bundle.warnings:
@@ -205,9 +189,27 @@ def _export(pipeline: Pipeline, arguments, work: Path) -> None:
         report("perfil pronto; use --install-profile para instalá-lo no PULSARIS")
 
 
+def _copy_odf(pipeline: Pipeline, source: Path, work: Path) -> Path:
+    """Copia um ODF já baixado para a pasta da observação e o registra."""
+    import shutil
+
+    source = source.resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"diretório de ODF inexistente: {source}")
+    destination = work / "odf"
+    if not destination.exists():
+        shutil.copytree(source, destination)
+    pipeline.session.record_action("acquisition", f"ODF copiado de {source}",
+                                   shell=["cp", "-a", str(source), str(destination)])
+    return pipeline.use_local_odf(destination)
+
+
 def main() -> int:
     arguments = parse_arguments()
     settings = Settings.load()
+    if arguments.work_dir is not None:
+        # Só nesta execução: as preferências do usuário não são regravadas.
+        settings.work_dir = arguments.work_dir.resolve()
     coordinates = (arguments.ra, arguments.dec)
     if coordinates[0] is None and arguments.target:
         try:
@@ -218,6 +220,10 @@ def main() -> int:
     session = Session.load_or_create(work, arguments.obsid, arguments.target)
 
     started = time.monotonic()
+    from xredux.export import manifest as manifest_export
+    version = manifest_export.software()
+    report(f"XreduX {version.get('xredux_commit') or 'sem commit'}"
+           + (" (com alterações não commitadas)" if version.get("xredux_dirty") else ""))
     pipeline = Pipeline(settings, session,
                         build_context(settings, session,
                                       on_line=lambda line: print("  " + line, flush=True)))
@@ -233,6 +239,9 @@ def main() -> int:
     if session.is_done("acquisition") and session.steps["acquisition"].outputs:
         pipeline.state.odf_dir = Path(session.steps["acquisition"].outputs[0])
         report(f"já baixado: {pipeline.state.odf_dir}")
+    elif arguments.odf is not None:
+        _copy_odf(pipeline, arguments.odf, work)
+        report(f"ODF copiado de {arguments.odf} para {pipeline.state.odf_dir}")
     else:
         pipeline.acquire(arguments.obsid)
         report(f"ODF em {pipeline.state.odf_dir}")
@@ -257,8 +266,12 @@ def main() -> int:
     else:
         events = pipeline.process(instruments)
     for item in events:
+        try:
+            resolution = f"{item.time_resolution_us():g} µs"
+        except ValueError as error:
+            resolution = f"resolução desconhecida ({error})"
         report(f"{item.label()} · {item.ontime_s or 0:.0f} s · "
-               f"{item.time_resolution_us():g} µs · {item.path.name}")
+               f"{resolution} · {item.path.name}")
     selected = pipeline.state.selected
     if selected is None:
         print(f"{RED}nenhuma lista de eventos foi produzida{RESET}")
@@ -268,7 +281,8 @@ def main() -> int:
     # -- filtragem --------------------------------------------------------
     stage("4. Filtragem de flares")
     curve = pipeline.background_curve()
-    threshold = curve.suggested_threshold()
+    threshold = (arguments.threshold if arguments.threshold is not None
+                 else curve.suggested_threshold())
     report(f"limiar {threshold:.3f} ct/s · preserva "
            f"{curve.good_fraction(threshold) * 100:.1f}% do tempo")
     clean = pipeline.filter_flares(threshold=threshold)
@@ -292,6 +306,25 @@ def main() -> int:
         report(f"fonte em X={x:.1f} Y={y:.1f}")
     pipeline.set_regions(source, background)
     report(f"{source.description} / {background.description}")
+
+    # -- empilhamento -----------------------------------------------------
+    stage("5b. Empilhamento")
+    if arguments.no_pileup:
+        warn("diagnóstico de empilhamento não executado (--no-pileup)")
+    else:
+        try:
+            check = pipeline.check_pileup()
+        except Exception as error:  # registrado na sessão como falha
+            warn(f"epatplot falhou: {error}")
+        else:
+            outcome, verdict = check.outcome(), check.verdict()
+            singles = check.singles or (float("nan"), float("nan"))
+            doubles = check.doubles or (float("nan"), float("nan"))
+            report(f"{outcome}: {verdict} · s = {singles[0]:.3f} ± {singles[1]:.3f} · "
+                   f"d = {doubles[0]:.3f} ± {doubles[1]:.3f} · "
+                   f"{check.rate_ct_s:.3f} ct/s na região")
+            if verdict != "clean":
+                warn(f"empilhamento: {verdict}; veja {check.plot.name}")
 
     # -- timing -----------------------------------------------------------
     stage("6. Timing")
